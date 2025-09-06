@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use anyhow::{Context, Result};
+use rdev::Key;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
@@ -8,6 +9,8 @@ use vosk::{LogLevel, Model};
 
 use core::audio::*;
 use core::command::*;
+use core::keypress::*;
+use core::keypress::LocalKey::{CTRL, DOWN, LEFT, RIGHT, UP};
 use core::matcher::fuzzy::*;
 
 mod core;
@@ -25,22 +28,55 @@ fn main() -> Result<()> {
         "集 束 弹",
         "汽油 弹",
         "烟雾弹",
+        "一百 一",
+        "补给",
+        "补给 包",
+        "增援",
+        "轨道",
+        "火",
+        "加特林",
+        "榴弹 枪",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
 
-    let mut command_map: HashMap<&'static str, Box<dyn Fn() + Send + Sync>> = HashMap::new();
-    // TODO:
-    command_map.insert("呼叫飞鹰", Box::new(|| {
-        println!("飞鹰已经就绪");
-    }));
-    command_map.insert("呼叫飞鹰五百", Box::new(|| {}));
-    command_map.insert("呼叫飞鹰空袭", Box::new(|| {}));
-    command_map.insert("呼叫飞鹰集束弹", Box::new(|| {}));
-    command_map.insert("呼叫飞鹰汽油弹", Box::new(|| {}));
-    command_map.insert("呼叫飞鹰烟雾弹", Box::new(|| {}));
-    let command = Arc::new(Command::new(command_map));
+    let mut key_map: HashMap<LocalKey, Key> = HashMap::new();
+    key_map.insert(UP, Key::KeyW);
+    key_map.insert(DOWN, Key::KeyS);
+    key_map.insert(LEFT, Key::KeyA);
+    key_map.insert(RIGHT, Key::KeyD);
+    key_map.insert(CTRL, Key::ControlLeft);
+    let key_presser = Arc::new(KeyPresser::new(key_map));
+
+    let command_map= [
+        /// 飞鹰
+        ("呼叫飞鹰", vec![UP, RIGHT, RIGHT]),
+        ("呼叫飞鹰五百", vec![UP, RIGHT, DOWN, DOWN, DOWN]),
+        ("呼叫飞鹰空袭", vec![UP, RIGHT, DOWN, LEFT]),
+        ("呼叫飞鹰集束弹", vec![UP, RIGHT, DOWN, DOWN, RIGHT]),
+        ("呼叫飞鹰汽油弹", vec![UP, RIGHT, DOWN, UP]),
+        ("呼叫飞鹰烟雾弹", vec![UP, RIGHT, UP, DOWN]),
+        ("呼叫飞鹰烟一百一", vec![UP, RIGHT, UP, LEFT]),
+        /// 补给
+        ("呼叫补给", vec![DOWN, RIGHT, RIGHT]),
+        ("呼叫补给包", vec![DOWN, LEFT, DOWN, UP, UP, DOWN]),
+        /// 轨道武器
+        ("呼叫轨道火", vec![RIGHT, RIGHT, DOWN, LEFT, RIGHT, UP]),
+        /// 3武
+        ("呼叫榴弹枪", vec![DOWN, LEFT, UP, LEFT, DOWN]),
+        /// mission
+        ("呼叫增援", vec![UP, DOWN, RIGHT, LEFT, UP]),
+    ];
+    let mut command_hashmap: HashMap<&'static str, Box<dyn Fn() + Send + Sync>> = HashMap::new();
+    for (command, keys) in command_map {
+        let key_presser_ref = Arc::clone(&key_presser);
+        command_hashmap.insert(command, Box::new(move || {
+            &key_presser_ref.push(keys.as_slice());
+        }));
+    }
+
+    let command = Arc::new(Command::new(command_hashmap));
     let command_dic = command.keys().map(|x| x.to_string()).collect::<Vec<_>>();
 
     let config = AudioRecognizerConfig {
@@ -67,6 +103,7 @@ fn main() -> Result<()> {
     });
 
     processor.start(on_result);
+    key_presser.listen(); // 监听键盘事件
 
     // 阻塞线程
     std::thread::park();

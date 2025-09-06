@@ -1,9 +1,9 @@
+use log::{info, warn};
+use rdev::{Event, EventType, Key, SimulateError, listen, simulate};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-
-use rdev::{Event, EventType, Key, SimulateError, listen, simulate};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LocalKey {
@@ -35,6 +35,9 @@ impl KeyPresser {
     pub fn listen(&self) {
         let key_map = self.key_map.clone();
         let one_stack = Arc::clone(&self.one_stack);
+
+        let ctrl_flag = Arc::new(Mutex::new(false)); // 标记 Ctrl 是否按下
+        let ctrl_flag_clone = ctrl_flag.clone();
         std::thread::spawn(move || {
             // 监听按键事件
             listen(move |event| {
@@ -42,16 +45,34 @@ impl KeyPresser {
                 if let EventType::KeyPress(key) = event.event_type {
                     // 处理 CTRL 键
                     if key == *key_map.get(&LocalKey::CTRL).unwrap() {
-                        // 按顺序按下栈内按键
-                        if let Some(keys) = one_stack.lock().unwrap().take() {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            for local_key in keys {
-                                let key = *key_map.get(&local_key).unwrap();
-                                simulate(&EventType::KeyPress(key)).unwrap();
-                                std::thread::sleep(std::time::Duration::from_millis(50));
-                                simulate(&EventType::KeyRelease(key)).unwrap();
-                                std::thread::sleep(std::time::Duration::from_millis(20));
+                        let mut flag = ctrl_flag_clone.lock().unwrap();
+                        if !*flag {
+                            *flag = true;
+
+                            // 按顺序按下栈内按键
+                            let keys = one_stack.lock().unwrap().take();
+                            if let Some(keys) = keys {
+                                let key_map_clone = key_map.clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(std::time::Duration::from_millis(400));
+                                    info!("press {:?}", &keys);
+                                    for local_key in keys {
+                                        let key = *key_map_clone.get(&local_key).unwrap();
+                                        simulate(&EventType::KeyPress(key)).unwrap();
+                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                        simulate(&EventType::KeyRelease(key)).unwrap();
+                                        std::thread::sleep(std::time::Duration::from_millis(20));
+                                    }
+                                });
                             }
+                        }
+                    }
+                }
+                if let EventType::KeyRelease(key) = event.event_type {
+                    if key == *key_map.get(&LocalKey::CTRL).unwrap() {
+                        let mut flag = ctrl_flag_clone.lock().unwrap();
+                        if *flag {
+                            *flag = false;
                         }
                     }
                 }

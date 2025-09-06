@@ -77,7 +77,7 @@ fn main() -> Result<()> {
         let key_presser_ref = Arc::clone(&key_presser);
         let speaker_ref = Arc::clone(&speaker);
         command_hashmap.insert(command, Box::new(move || {
-            info!("simulate key presses: {:?}", keys);
+            info!("push key presses: {:?}", keys);
             &key_presser_ref.push(keys.as_slice());
 
             let audio_path = std::env::current_dir().unwrap().join("audio").join(audio_path);

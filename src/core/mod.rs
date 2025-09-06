@@ -1,4 +1,4 @@
-mod audio;
-mod command;
-mod keypress;
-mod matcher;
+pub mod audio;
+pub mod command;
+pub mod keypress;
+pub mod matcher;

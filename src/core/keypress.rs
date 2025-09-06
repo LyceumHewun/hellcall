@@ -42,6 +42,7 @@ impl KeyPresser {
                 if let EventType::KeyPress(key) = event.event_type {
                     // 处理 CTRL 键
                     if key == *key_map.get(&LocalKey::CTRL).unwrap() {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
                         // 按顺序按下栈内按键
                         if let Some(keys) = one_stack.lock().unwrap().take() {
                             for local_key in keys {

@@ -216,10 +216,7 @@ impl AudioBufferProcessor {
     }
 
     #[cfg(target_os = "windows")]
-    pub fn start(
-        &mut self,
-        on_result: Box<dyn Fn(RecognitionResult) + Send + 'static>,
-    ) -> Result<()> {
+    pub fn start(&mut self, on_result: Box<dyn Fn(RecognitionResult) + Send>) -> Result<()> {
         let mut child = Command::new("ffmpeg")
             .args(&[
                 "-hide_banner",

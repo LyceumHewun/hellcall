@@ -107,17 +107,16 @@ fn main() -> Result<()> {
             return;
         }
 
-        info!("speech: {}", speech);
+        if let Some(pos) = speech.rfind("呼叫") {
+            let command_str = &speech[pos..];
+            info!("speech: {}", &command_str);
 
-        // 首句触发
-        if !speech.starts_with("呼叫") {
+            if let Some(command) = matcher_ref.match_str(&command_str) {
+                info!("hit command: {}", command);
+                command_ref.execute(command);
+            }
+        } else {
             warn!("miss required word '呼叫': {}", speech);
-            return;
-        }
-
-        if let Some(command) = matcher_ref.match_str(&speech) {
-            info!("hit command: {}", command);
-            command_ref.execute(command);
         }
     });
 

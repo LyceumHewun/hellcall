@@ -124,6 +124,8 @@ fn main() -> Result<()> {
     processor.start(on_result);
     key_presser.listen(); // 监听键盘事件
 
+    info!("startup success");
+
     // 阻塞线程
     std::thread::park();
 

@@ -12,6 +12,7 @@ use core::command::*;
 use core::keypress::*;
 use core::keypress::LocalKey::{CTRL, DOWN, LEFT, RIGHT, UP};
 use core::matcher::fuzzy::*;
+use core::speaker::*;
 
 mod core;
 
@@ -48,31 +49,36 @@ fn main() -> Result<()> {
     key_map.insert(RIGHT, Key::KeyD);
     key_map.insert(CTRL, Key::ControlLeft);
     let key_presser = Arc::new(KeyPresser::new(key_map));
+    let speaker = Arc::new(Speaker::new()?);
 
     let command_map= [
         /// 飞鹰
-        ("呼叫飞鹰", vec![UP, RIGHT, RIGHT]),
-        ("呼叫飞鹰五百", vec![UP, RIGHT, DOWN, DOWN, DOWN]),
-        ("呼叫飞鹰空袭", vec![UP, RIGHT, DOWN, LEFT]),
-        ("呼叫飞鹰集束弹", vec![UP, RIGHT, DOWN, DOWN, RIGHT]),
-        ("呼叫飞鹰汽油弹", vec![UP, RIGHT, DOWN, UP]),
-        ("呼叫飞鹰烟雾弹", vec![UP, RIGHT, UP, DOWN]),
-        ("呼叫飞鹰烟一百一", vec![UP, RIGHT, UP, LEFT]),
+        ("呼叫飞鹰", vec![UP, RIGHT, RIGHT], "eagle.wav"),
+        ("呼叫飞鹰五百", vec![UP, RIGHT, DOWN, DOWN, DOWN], "eagle.wav"),
+        ("呼叫飞鹰空袭", vec![UP, RIGHT, DOWN, LEFT], "eagle.wav"),
+        ("呼叫飞鹰集束弹", vec![UP, RIGHT, DOWN, DOWN, RIGHT], "eagle.wav"),
+        ("呼叫飞鹰汽油弹", vec![UP, RIGHT, DOWN, UP], "eagle.wav"),
+        ("呼叫飞鹰烟雾弹", vec![UP, RIGHT, UP, DOWN], "eagle.wav"),
+        ("呼叫飞鹰一百一", vec![UP, RIGHT, UP, LEFT], "eagle.wav"),
         /// 补给
-        ("呼叫补给", vec![DOWN, RIGHT, RIGHT]),
-        ("呼叫补给包", vec![DOWN, LEFT, DOWN, UP, UP, DOWN]),
+        ("呼叫补给", vec![DOWN, DOWN, UP, RIGHT], "resupply.wav"),
+        ("呼叫补给包", vec![DOWN, LEFT, DOWN, UP, UP, DOWN], "resupply.wav"),
         /// 轨道武器
-        ("呼叫轨道火", vec![RIGHT, RIGHT, DOWN, LEFT, RIGHT, UP]),
+        ("呼叫轨道火", vec![RIGHT, RIGHT, DOWN, LEFT, RIGHT, UP], "orbital_napalm_barrage.wav"),
         /// 3武
-        ("呼叫榴弹枪", vec![DOWN, LEFT, UP, LEFT, DOWN]),
+        ("呼叫榴弹枪", vec![DOWN, LEFT, UP, LEFT, DOWN], "resupply.wav"),
         /// mission
-        ("呼叫增援", vec![UP, DOWN, RIGHT, LEFT, UP]),
+        ("呼叫增援", vec![UP, DOWN, RIGHT, LEFT, UP], "reinforce.wav"),
     ];
     let mut command_hashmap: HashMap<&'static str, Box<dyn Fn() + Send + Sync>> = HashMap::new();
-    for (command, keys) in command_map {
+    for (command, keys, audio_path) in command_map {
         let key_presser_ref = Arc::clone(&key_presser);
+        let speaker_ref = Arc::clone(&speaker);
         command_hashmap.insert(command, Box::new(move || {
             &key_presser_ref.push(keys.as_slice());
+
+            let audio_path = std::env::current_dir().unwrap().join("audio").join(audio_path);
+            speaker_ref.play_wav(audio_path.to_str().unwrap()).unwrap();
         }));
     }
 
@@ -80,7 +86,7 @@ fn main() -> Result<()> {
     let command_dic = command.keys().map(|x| x.to_string()).collect::<Vec<_>>();
 
     let config = AudioRecognizerConfig {
-        chunk_time: 0.2,
+        chunk_time: 0.2, // 0.2 秒识别一次
         grammar,
         vad_silence_duration: 500,
     };
@@ -92,8 +98,13 @@ fn main() -> Result<()> {
     let command_ref = Arc::clone(&command);
     let matcher_ref = Arc::clone(&matcher);
     let on_result = Box::new(move |result: RecognitionResult| {
-        let speech = result.text;
+        let speech = result.text.trim();
         if speech.is_empty() {
+            return;
+        }
+
+        // 首句触发
+        if !speech.starts_with("呼叫") {
             return;
         }
 

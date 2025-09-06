@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use vosk::{LogLevel, Model};
+use log::{info, warn};
 
 use core::audio::*;
 use core::command::*;
@@ -19,6 +20,7 @@ mod core;
 fn main() -> Result<()> {
     #[cfg(not(debug_assertions))]
     vosk::set_log_level(LogLevel::Error);
+    env_logger::init();
 
     let model_path = env::args().nth(1).context("module path is empty")?;
     let grammar = vec![
@@ -75,9 +77,11 @@ fn main() -> Result<()> {
         let key_presser_ref = Arc::clone(&key_presser);
         let speaker_ref = Arc::clone(&speaker);
         command_hashmap.insert(command, Box::new(move || {
+            info!("simulate key presses: {:?}", keys);
             &key_presser_ref.push(keys.as_slice());
 
             let audio_path = std::env::current_dir().unwrap().join("audio").join(audio_path);
+            info!("play audio: {:?}", audio_path);
             speaker_ref.play_wav(audio_path.to_str().unwrap()).unwrap();
         }));
     }
@@ -103,12 +107,16 @@ fn main() -> Result<()> {
             return;
         }
 
+        info!("speech: {}", speech);
+
         // 首句触发
         if !speech.starts_with("呼叫") {
+            warn!("miss required word '呼叫': {}", speech);
             return;
         }
 
         if let Some(command) = matcher_ref.match_str(&speech) {
+            info!("hit command: {}", command);
             command_ref.execute(command);
         }
     });

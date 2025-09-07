@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Ok, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
+use log::{debug, info};
 use std::io::{BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use vosk::{Model, Recognizer};
@@ -84,12 +85,18 @@ impl AudioRecognizer {
         audio_chunk: &[i16],
     ) -> Result<Option<RecognitionResult>> {
         if self.is_speaking {
-            self.recognizer.accept_waveform(audio_chunk);
+            self.recognizer
+                .accept_waveform(audio_chunk)
+                .context("Failed to accept waveform")?;
             let result = self.recognizer.partial_result();
-            return Ok(Some(RecognitionResult {
+            let result = RecognitionResult {
                 text: result.partial.to_string(),
                 is_partial: true,
-            }));
+            };
+
+            debug!("partial result: {:?}", result);
+
+            return Ok(Some(result));
         }
 
         Ok(None)
@@ -113,6 +120,8 @@ impl AudioRecognizer {
         };
 
         self.reset();
+
+        debug!("final result: {:?}", recognition_result);
 
         Ok(Some(recognition_result))
     }
@@ -208,6 +217,8 @@ impl AudioBufferProcessor {
             .context("Failed to get default input device")?;
         let device_name = device.name().context("Failed to get device name")?;
 
+        info!("default input device name: {}", &device_name);
+
         Ok(Self {
             recognizer: Arc::new(Mutex::new(recognizer)),
             device_name,
@@ -217,7 +228,7 @@ impl AudioBufferProcessor {
 
     #[cfg(target_os = "windows")]
     pub fn start(&mut self, on_result: Box<dyn Fn(RecognitionResult) + Send>) -> Result<()> {
-        let mut child = Command::new("ffmpeg")
+        let child = Command::new("ffmpeg")
             .args(&[
                 "-hide_banner",
                 "-loglevel",

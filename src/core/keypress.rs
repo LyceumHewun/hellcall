@@ -1,5 +1,6 @@
-use log::{info, warn};
-use rdev::{Event, EventType, Key, SimulateError, simulate};
+use anyhow::{Result, anyhow};
+use log::info;
+use rdev::{EventType, Key, simulate};
 use std::time::Duration;
 use std::{
     collections::HashMap,
@@ -34,7 +35,7 @@ impl KeyPresser {
     }
 
     /// block
-    pub fn listen(&self) {
+    pub fn listen(&self) -> Result<()> {
         let key_map = Arc::clone(&self.key_map);
         let one_stack = Arc::clone(&self.one_stack);
 
@@ -44,6 +45,7 @@ impl KeyPresser {
             let key_map = Arc::clone(&key_map);
             move || {
                 while let Ok(keys) = rx.recv() {
+                    info!("push key presses: {:?}", keys);
                     std::thread::sleep(Duration::from_millis(400));
                     for local_key in keys {
                         if let Some(&key) = key_map.get(&local_key) {
@@ -66,6 +68,9 @@ impl KeyPresser {
                     }
                 }
             }
-        });
+        })
+        .map_err(|err| anyhow!("listen key press error: {:?}", err))?;
+
+        Ok(())
     }
 }

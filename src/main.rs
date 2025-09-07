@@ -1,10 +1,11 @@
-#![allow(unused)]
+// #![allow(unused)]
 
 use anyhow::{Context, Result};
 use rdev::Key;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+#[cfg(not(debug_assertions))]
 use vosk::{LogLevel, Model};
 use log::{info, warn};
 
@@ -54,7 +55,7 @@ fn main() -> Result<()> {
     let speaker = Arc::new(Speaker::new()?);
 
     let command_map= [
-        /// 飞鹰
+        // 飞鹰
         ("呼叫飞鹰", vec![UP, RIGHT, RIGHT], "eagle.wav"),
         ("呼叫飞鹰五百", vec![UP, RIGHT, DOWN, DOWN, DOWN], "eagle.wav"),
         ("呼叫飞鹰空袭", vec![UP, RIGHT, DOWN, LEFT], "eagle.wav"),
@@ -62,14 +63,14 @@ fn main() -> Result<()> {
         ("呼叫飞鹰汽油弹", vec![UP, RIGHT, DOWN, UP], "eagle.wav"),
         ("呼叫飞鹰烟雾弹", vec![UP, RIGHT, UP, DOWN], "eagle.wav"),
         ("呼叫飞鹰一百一", vec![UP, RIGHT, UP, LEFT], "eagle.wav"),
-        /// 补给
+        // 补给
         ("呼叫补给", vec![DOWN, DOWN, UP, RIGHT], "resupply.wav"),
         ("呼叫补给包", vec![DOWN, LEFT, DOWN, UP, UP, DOWN], "resupply.wav"),
-        /// 轨道武器
+        // 轨道武器
         ("呼叫轨道火", vec![RIGHT, RIGHT, DOWN, LEFT, RIGHT, UP], "orbital_napalm_barrage.wav"),
-        /// 3武
+        // 3武
         ("呼叫榴弹枪", vec![DOWN, LEFT, UP, LEFT, DOWN], "resupply.wav"),
-        /// mission
+        // mission
         ("呼叫增援", vec![UP, DOWN, RIGHT, LEFT, UP], "reinforce.wav"),
     ];
     let mut command_hashmap: HashMap<&'static str, Box<dyn Fn() + Send + Sync>> = HashMap::new();
@@ -77,11 +78,9 @@ fn main() -> Result<()> {
         let key_presser_ref = Arc::clone(&key_presser);
         let speaker_ref = Arc::clone(&speaker);
         command_hashmap.insert(command, Box::new(move || {
-            info!("push key presses: {:?}", keys);
-            &key_presser_ref.push(keys.as_slice());
+            key_presser_ref.push(keys.as_slice());
 
             let audio_path = std::env::current_dir().unwrap().join("audio").join(audio_path);
-            info!("play audio: {:?}", audio_path);
             speaker_ref.play_wav(audio_path.to_str().unwrap()).unwrap();
         }));
     }
@@ -120,9 +119,9 @@ fn main() -> Result<()> {
         }
     });
 
-    processor.start(on_result);
+    processor.start(on_result)?;
     // block
-    key_presser.listen();
+    key_presser.listen()?;
 
     Ok(())
 }

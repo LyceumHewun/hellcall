@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder};
+use log::info;
+use rodio::{OutputStream, OutputStreamBuilder};
 use std::fs::File;
 use std::io::BufReader;
 
@@ -21,6 +22,7 @@ impl Speaker {
         sink.set_volume(1.7);
         sink.set_speed(1.05);
         sink.sleep_until_end();
+        info!("play audio: {:?}", path);
         Ok(())
     }
 }

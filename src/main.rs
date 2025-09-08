@@ -13,7 +13,7 @@ use core::audio::*;
 use core::command::*;
 use core::keypress::*;
 use core::keypress::LocalKey::{CTRL, DOWN, LEFT, RIGHT, UP};
-use core::matcher::fuzzy::*;
+use core::matcher::*;
 use core::speaker::*;
 
 mod core;
@@ -246,7 +246,7 @@ fn main() -> Result<()> {
     let recognizer = AudioRecognizer::new(model_path.as_str(), config)?;
     let mut processor = AudioBufferProcessor::new(recognizer)?;
 
-    let matcher = Arc::new(FuzzyMatcher::new(command_dic));
+    let matcher = Arc::new(LevenshteinMatcher::new(command_dic));
 
     let command_ref = Arc::clone(&command);
     let matcher_ref = Arc::clone(&matcher);
@@ -265,6 +265,8 @@ fn main() -> Result<()> {
             if let Some(command) = matcher_ref.match_str(&command_str) {
                 info!("hit command: {}", command);
                 command_ref.execute(command);
+            } else {
+                warn!("no matching command found: {}", &command_str);
             }
         } else {
             warn!("miss required word '{}': {}", hit_word, speech);

@@ -226,23 +226,29 @@ impl AudioBufferProcessor {
         })
     }
 
-    #[cfg(target_os = "windows")]
     pub fn start(&mut self, on_result: Box<dyn Fn(RecognitionResult) + Send>) -> Result<()> {
+        let filter = ["highpass=f=100", "lowpass=f=8000"].join(",");
+
         let child = Command::new("ffmpeg")
             .args(&[
                 "-hide_banner",
-                "-loglevel",
-                "error",
+                "-loglevel", "error",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-flush_packets", "1",
+                "-avioflags", "direct",
                 "-f",
-                "dshow", // Windows 麦克风
-                "-i",
-                format!("audio={}", &self.device_name).as_str(),
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-f",
-                "s16le",
+                #[cfg(target_os = "windows")]
+                "dshow",
+                #[cfg(target_os = "linux")]
+                "pulse",
+                #[cfg(target_os = "macos")]
+                "avfoundation",
+                "-i", format!("audio={}", &self.device_name).as_str(),
+                "-ac", "1",
+                "-ar", "16000",
+                "-af", &filter,
+                "-f", "s16le",
                 "-",
             ])
             .stdout(Stdio::piped())

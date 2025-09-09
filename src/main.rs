@@ -239,9 +239,9 @@ fn main() -> Result<()> {
     let command_dic = command.keys().map(|x| x.to_string()).collect::<Vec<_>>();
 
     let config = AudioRecognizerConfig {
-        chunk_time: 0.2, // 0.2 秒识别一次
+        chunk_time: 0.2, // 0.2 秒识别一次, 注意要大于 0.1, 最好是 0.1 的倍数
         grammar,
-        vad_silence_duration: 500,
+        vad_silence_duration: 200,
     };
     let recognizer = AudioRecognizer::new(model_path.as_str(), config)?;
     let mut processor = AudioBufferProcessor::new(recognizer)?;

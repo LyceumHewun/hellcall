@@ -38,7 +38,7 @@ pub struct RecognizerConfig {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TriggerConfig {
-    pub hit_word: String,
+    pub hit_word: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

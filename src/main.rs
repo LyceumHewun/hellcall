@@ -14,9 +14,11 @@ use core::command::*;
 use core::keypress::*;
 use core::matcher::*;
 use core::speaker::*;
+use utils::*;
 
 mod config;
 pub mod core;
+mod utils;
 
 fn main() -> Result<()> {
     // print banner
@@ -72,6 +74,8 @@ fn main() -> Result<()> {
 
     let matcher = Arc::new(LevenshteinMatcher::new(command_dic));
 
+    let trigger = config.trigger.clone();
+
     let mut audio_recognizer_config: AudioRecognizerConfig = config.recognizer.into();
     let mut grammar: Vec<String> = config
         .commands
@@ -79,18 +83,19 @@ fn main() -> Result<()> {
         .map(|cmd| {
             let grammar = cmd.grammar.clone();
             if let Some(grammar) = grammar {
-                grammar
-            } else {
-                let command = cmd.command.clone();
-                command
-                    .chars()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                if !grammar.is_empty() {
+                    return grammar;
+                }
             }
+            let command = cmd.command.clone();
+            command.add_between_chars(" ")
         })
         .collect();
-    grammar.push(config.trigger.hit_word.clone());
+
+    if !&trigger.hit_word.is_empty() {
+        grammar.push(trigger.hit_word.clone().unwrap().add_between_chars(" "));
+    }
+
     audio_recognizer_config.set_grammar(grammar);
     let recognizer = AudioRecognizer::new(model_path.as_str(), audio_recognizer_config)?;
     let mut processor = AudioBufferProcessor::new(recognizer)?;
@@ -103,20 +108,30 @@ fn main() -> Result<()> {
             return;
         }
 
-        // 命中词
-        let hit_word = &config.trigger.hit_word;
-        if let Some(pos) = speech.rfind(hit_word) {
-            let command_str = &speech[pos + hit_word.len()..];
-            info!("speech: {} {}", hit_word, &command_str);
-
-            if let Some(command) = matcher_ref.match_str(&command_str) {
-                info!("hit command: {}", command);
-                command_ref.execute(command);
-            } else {
-                warn!("no matching command found: {}", &command_str);
-            }
+        // process speech
+        let speech = speech.replace(" ", "");
+        let hit_word = trigger.hit_word.clone();
+        let command_to_match = if hit_word.is_empty() {
+            info!("speech: {}", speech);
+            speech
         } else {
-            warn!("miss required word '{}': {}", hit_word, speech);
+            let hit_word = hit_word.unwrap();
+            if let Some(pos) = speech.rfind(hit_word.as_str()) {
+                let command_str = &speech[pos + hit_word.len()..];
+                info!("speech: {} {}", hit_word, command_str);
+                command_str.to_string()
+            } else {
+                warn!("miss required word '{}': {}", hit_word, speech);
+                return;
+            }
+        };
+
+        // match command
+        if let Some(command) = matcher_ref.match_str(command_to_match.as_str()) {
+            info!("hit command: {}", command);
+            command_ref.execute(command);
+        } else {
+            warn!("no matching command found: {}", command_to_match);
         }
     });
 

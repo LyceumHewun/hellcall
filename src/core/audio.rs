@@ -31,6 +31,12 @@ impl Default for AudioRecognizerConfig {
     }
 }
 
+impl AudioRecognizerConfig {
+    pub fn set_grammar(&mut self, grammar: Vec<String>) {
+        self.grammar = grammar;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecognitionResult {
     pub text: String,

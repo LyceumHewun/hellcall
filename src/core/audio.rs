@@ -167,17 +167,11 @@ impl AudioRecognizer {
 
     /// 更新语音状态
     fn update_speech_state(&mut self, is_speech: bool) {
-        let now = std::time::Instant::now();
-
         if is_speech {
-            // 检测到语音，重置静音计时器
             self.silence_start = None;
-
-            // 如果之前不在说话状态，检查是否满足最小语音持续时间
-            if !self.is_speaking {
-                self.is_speaking = true;
-            }
+            self.is_speaking = true;
         } else if self.is_speaking {
+            let now = std::time::Instant::now();
             // 没有检测到语音，但之前处于说话状态
             if let Some(silence_start) = self.silence_start {
                 // 检查静音持续时间是否超过阈值

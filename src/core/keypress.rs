@@ -14,7 +14,7 @@ pub enum LocalKey {
     DOWN,
     LEFT,
     RIGHT,
-    CTRL,
+    OPEN,
 }
 
 pub struct KeyPresser {
@@ -46,7 +46,7 @@ impl KeyPresser {
             let key_map = Arc::clone(&key_map);
             move || {
                 while let Ok(keys) = rx.recv() {
-                    info!("push key presses: {:?}", keys);
+                    info!("key pressed: {:?}", keys);
                     std::thread::sleep(Duration::from_millis(400));
                     for local_key in keys {
                         if let Some(&key) = key_map.get(&local_key) {
@@ -63,7 +63,7 @@ impl KeyPresser {
         // block
         rdev::listen(move |event| {
             if let EventType::KeyPress(key) = event.event_type {
-                if key == *key_map.get(&LocalKey::CTRL).unwrap() {
+                if key == *key_map.get(&LocalKey::OPEN).unwrap() {
                     if let Some(keys) = one_stack.lock().unwrap().take() {
                         tx.send(keys).unwrap();
                     }

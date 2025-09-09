@@ -19,7 +19,7 @@ pub struct Config {
     /// DOWN = "KeyS"
     /// LEFT = "KeyA"
     /// RIGHT = "KeyD"
-    /// CTRL = "ControlLeft"
+    /// OPEN = "ControlLeft"
     /// ```
     /// 
     /// 更多按键信息请参考: https://docs.rs/rdev/latest/rdev/enum.Key.html

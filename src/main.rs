@@ -4,7 +4,7 @@ use anyhow::Result;
 use log::{info, warn};
 use rand::seq::IndexedRandom;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::{env, fs};
 use vosk::LogLevel;
 
@@ -72,7 +72,7 @@ fn main() -> Result<()> {
     let command = Arc::new(Command::new(command_map));
     let command_dic = command.keys().map(|x| x.to_string()).collect::<Vec<_>>();
 
-    let matcher = Arc::new(LevenshteinMatcher::new(command_dic));
+    let matcher = Arc::new(Mutex::new(LevenshteinMatcher::new(command_dic)));
 
     let trigger = config.trigger.clone();
 
@@ -127,9 +127,13 @@ fn main() -> Result<()> {
         };
 
         // match command
-        if let Some(command) = matcher_ref.match_str(command_to_match.as_str()) {
+        if let Some(command) = matcher_ref
+            .lock()
+            .unwrap()
+            .match_str(command_to_match.as_str())
+        {
             info!("hit command: {}", command);
-            command_ref.execute(command);
+            command_ref.execute(command.as_str());
         } else {
             warn!("no matching command found: {}", command_to_match);
         }

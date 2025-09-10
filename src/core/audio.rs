@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Ok, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
-use log::{debug, info};
+use log::{debug, info, warn};
 use std::io::{BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use vosk::{Model, Recognizer};
@@ -307,6 +307,7 @@ impl AudioBufferProcessor {
     pub fn stop(&mut self) -> Result<()> {
         if let Some(mut child) = self.child_process.take() {
             child.kill().context("Failed to kill child process")?;
+            child.wait().context("Failed to wait for child process")?;
         }
         Ok(())
     }

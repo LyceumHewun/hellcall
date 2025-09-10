@@ -113,8 +113,6 @@ impl AudioRecognizer {
             return Ok(None);
         }
 
-        self.is_finalized.store(false, Ordering::Release);
-
         let result = self.recognizer.final_result();
         let recognition_result = RecognitionResult {
             text: result
@@ -173,24 +171,24 @@ impl AudioRecognizer {
 
     /// 更新语音状态
     fn update_speech_state(&mut self, is_speech: bool) {
+        let mut silence_start = self.silence_start.lock().unwrap();
         if is_speech {
-            *self.silence_start.lock().unwrap() = None;
+            *silence_start = None;
             self.is_speaking.store(true, Ordering::Release);
         } else if self.is_speaking.load(Ordering::Acquire) {
             let now = std::time::Instant::now();
             // 没有检测到语音，但之前处于说话状态
-            if let Some(silence_start) = *self.silence_start.lock().unwrap() {
+            if let Some(start) = *silence_start {
                 // 检查静音持续时间是否超过阈值
-                if now.duration_since(silence_start).as_millis()
-                    > self.config.vad_silence_duration as u128
+                if now.duration_since(start).as_millis() > self.config.vad_silence_duration as u128
                 {
                     self.is_speaking.store(false, Ordering::Release);
-                    *self.silence_start.lock().unwrap() = None;
+                    *silence_start = None;
                     self.is_finalized.store(true, Ordering::Release);
                 }
             } else {
                 // 开始静音计时
-                *self.silence_start.lock().unwrap() = Some(now);
+                *silence_start = Some(now);
             }
         }
     }

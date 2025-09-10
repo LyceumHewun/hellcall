@@ -227,6 +227,10 @@ impl AudioBufferProcessor {
     }
 
     pub fn start(&mut self, on_result: Box<dyn Fn(RecognitionResult) + Send>) -> Result<()> {
+        if self.is_start() {
+            self.stop()?;
+        }
+
         let filter = ["highpass=f=100", "lowpass=f=8000"].join(",");
 
         let child = Command::new("ffmpeg")
@@ -294,6 +298,10 @@ impl AudioBufferProcessor {
         });
 
         Ok(())
+    }
+
+    pub fn is_start(&self) -> bool {
+        self.child_process.is_some()
     }
 
     pub fn stop(&mut self) -> Result<()> {

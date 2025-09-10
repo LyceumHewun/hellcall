@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Ok, Result};
 use cpal::traits::{DeviceTrait, HostTrait};
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::io::{BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use vosk::{Model, Recognizer};
@@ -47,8 +47,8 @@ pub struct AudioRecognizer {
     model: Arc<Model>,
     recognizer: Recognizer,
     config: AudioRecognizerConfig,
-    is_speaking: bool,
-    silence_start: Option<std::time::Instant>,
+    is_speaking: AtomicBool,
+    silence_start: Mutex<Option<std::time::Instant>>,
     is_finalized: AtomicBool,
 }
 
@@ -62,8 +62,8 @@ impl Clone for AudioRecognizer {
             model: self.model.clone(),
             recognizer,
             config: self.config.clone(),
-            is_speaking: self.is_speaking.clone(),
-            silence_start: self.silence_start.clone(),
+            is_speaking: AtomicBool::new(self.is_speaking.load(Ordering::Acquire)),
+            silence_start: Mutex::new(self.silence_start.lock().unwrap().clone()),
             is_finalized: AtomicBool::new(self.is_finalized.load(Ordering::Acquire)),
         }
     }
@@ -80,8 +80,8 @@ impl AudioRecognizer {
             model: Arc::new(model),
             recognizer,
             config,
-            is_speaking: false,
-            silence_start: None,
+            is_speaking: AtomicBool::new(false),
+            silence_start: Mutex::new(None),
             is_finalized: AtomicBool::new(false),
         })
     }
@@ -90,7 +90,7 @@ impl AudioRecognizer {
         &mut self,
         audio_chunk: &[i16],
     ) -> Result<Option<RecognitionResult>> {
-        if self.is_speaking {
+        if self.is_speaking.load(Ordering::Acquire) {
             self.recognizer
                 .accept_waveform(audio_chunk)
                 .context("Failed to accept waveform")?;
@@ -174,31 +174,32 @@ impl AudioRecognizer {
     /// 更新语音状态
     fn update_speech_state(&mut self, is_speech: bool) {
         if is_speech {
-            self.silence_start = None;
-            self.is_speaking = true;
-        } else if self.is_speaking {
+            *self.silence_start.lock().unwrap() = None;
+            self.is_speaking.store(true, Ordering::Release);
+        } else if self.is_speaking.load(Ordering::Acquire) {
             let now = std::time::Instant::now();
             // 没有检测到语音，但之前处于说话状态
-            if let Some(silence_start) = self.silence_start {
+            if let Some(silence_start) = *self.silence_start.lock().unwrap() {
                 // 检查静音持续时间是否超过阈值
                 if now.duration_since(silence_start).as_millis()
                     > self.config.vad_silence_duration as u128
                 {
-                    self.is_speaking = false;
-                    self.silence_start = None;
+                    self.is_speaking.store(false, Ordering::Release);
+                    *self.silence_start.lock().unwrap() = None;
                     self.is_finalized.store(true, Ordering::Release);
                 }
             } else {
                 // 开始静音计时
-                self.silence_start = Some(now);
+                *self.silence_start.lock().unwrap() = Some(now);
             }
         }
     }
 
     pub fn reset(&mut self) {
         self.recognizer.reset();
-        self.is_speaking = false;
-        self.silence_start = None;
+        self.is_speaking.store(false, Ordering::Release);
+        *self.silence_start.lock().unwrap() = None;
+        self.is_finalized.store(false, Ordering::Release);
     }
 }
 

@@ -203,7 +203,7 @@ impl AudioRecognizer {
 
 pub struct AudioBufferProcessor {
     recognizer: Arc<Mutex<AudioRecognizer>>,
-    device_name: String,
+    input_device_name: String,
     child_process: Option<Child>,
 }
 
@@ -214,13 +214,21 @@ impl AudioBufferProcessor {
         let device = host
             .default_input_device()
             .context("Failed to get default input device")?;
-        let device_name = device.name().context("Failed to get device name")?;
+        let input_device_name = device.name().context("Failed to get device name")?;
 
-        info!("default input device name: {}", &device_name);
+        info!("default input device name: {}", &input_device_name);
 
         Ok(Self {
             recognizer: Arc::new(Mutex::new(recognizer)),
-            device_name,
+            input_device_name,
+            child_process: None,
+        })
+    }
+
+    pub fn new_with_input_device_name(recognizer: AudioRecognizer, input_device_name: String) -> Result<Self> {
+        Ok(Self {
+            recognizer: Arc::new(Mutex::new(recognizer)),
+            input_device_name,
             child_process: None,
         })
     }
@@ -247,7 +255,7 @@ impl AudioBufferProcessor {
                 "pulse",
                 #[cfg(target_os = "macos")]
                 "avfoundation",
-                "-i", format!("audio={}", &self.device_name).as_str(),
+                "-i", format!("audio={}", &self.input_device_name).as_str(),
                 "-ac", "1",
                 "-ar", "16000",
                 "-af", &filter,

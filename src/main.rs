@@ -1,6 +1,8 @@
 // #![allow(unused)]
 
 use anyhow::Result;
+use cpal::traits::{DeviceTrait, HostTrait};
+use inquire::Select;
 use log::{info, warn};
 use rand::seq::IndexedRandom;
 use std::collections::HashMap;
@@ -41,6 +43,10 @@ fn main() -> Result<()> {
     // load config
     let content = fs::read_to_string(&config_path)?;
     let config: Config = toml::from_str(&content)?;
+
+    // choose input device
+    let input_device_name = get_input_device_name()?;
+    info!("input_device_name: {}", input_device_name);
 
     // init
     let key_presser = Arc::new(KeyPresser::new(config.key_map));
@@ -100,7 +106,8 @@ fn main() -> Result<()> {
 
     audio_recognizer_config.set_grammar(grammar);
     let recognizer = AudioRecognizer::new(model_path.as_str(), audio_recognizer_config)?;
-    let mut processor = AudioBufferProcessor::new(recognizer)?;
+    let mut processor =
+        AudioBufferProcessor::new_with_input_device_name(recognizer, input_device_name)?;
 
     let command_ref = Arc::clone(&command);
     let matcher_ref = Arc::clone(&matcher);
@@ -167,4 +174,23 @@ HellCall v{} - Helldivers 2 语音指令工具
     "#,
         env!("CARGO_PKG_VERSION")
     );
+}
+
+fn get_input_device_name() -> Result<String> {
+    let host = cpal::default_host();
+
+    if let Some(default_device) = host.default_input_device() {
+        let device_name = default_device.name()?;
+        if device_name.find("VB-Audio Virtual Cable").is_none() {
+            return Ok(device_name.to_string());
+        }
+    }
+
+    let devices = host.input_devices()?;
+    let device_names = devices
+        .into_iter()
+        .map(|x| x.name().unwrap())
+        .collect::<Vec<_>>();
+    let device_name = Select::new("请选择麦克风设备", device_names).prompt()?;
+    Ok(device_name)
 }

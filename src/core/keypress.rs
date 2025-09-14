@@ -122,13 +122,14 @@ impl KeyPresser {
                     std::thread::sleep(Duration::from_millis(config.wait_open_time));
                     for local_key in keys {
                         if let Some(key) = key_map.get(&local_key) {
-                            let event_press_type = match key {
-                                Input::Key(key) => EventType::KeyPress(*key),
-                                Input::Button(button) => EventType::ButtonPress(*button),
-                            };
-                            let event_release_type = match key {
-                                Input::Key(key) => EventType::KeyRelease(*key),
-                                Input::Button(button) => EventType::ButtonRelease(*button),
+                            let (event_press_type, event_release_type) = match key {
+                                Input::Key(key) => {
+                                    (EventType::KeyPress(*key), EventType::KeyRelease(*key))
+                                }
+                                Input::Button(button) => (
+                                    EventType::ButtonPress(*button),
+                                    EventType::ButtonRelease(*button),
+                                ),
                             };
 
                             // 模拟按下和释放
@@ -164,10 +165,9 @@ impl KeyPresser {
                 self.tx.send(keys.clone()).unwrap();
             } else {
                 *self.one_stack.lock().unwrap() = Some(keys.clone());
+                *self.spare_stack.lock().unwrap() = Some(keys.clone());
             }
         }
-
-        *self.spare_stack.lock().unwrap() = Some(keys.clone());
     }
 
     /// block

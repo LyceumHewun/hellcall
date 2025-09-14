@@ -1,12 +1,20 @@
 use anyhow::{Result, anyhow};
 use log::info;
-use rdev::{EventType, Key, simulate};
+use rdev::{Button, EventType, Key, simulate};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{
     collections::HashMap,
+    sync::mpsc,
     sync::{Arc, Mutex},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Input {
+    Key(Key),
+    Button(Button),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LocalKey {
@@ -18,71 +26,216 @@ pub enum LocalKey {
     OPEN,
     /// 重新执行上一次键盘宏按键
     RESEND,
+    /// 扔出战备, 一般是鼠标左键
+    THROW,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyPresserConfig {
+    /// 等待打开战备页面的时间
+    pub wait_open_time: u64,
+    /// 按键释放间隔
+    pub key_release_interval: u64,
+    /// 按键间隔
+    pub diff_key_interval: u64,
+}
+
+impl Default for KeyPresserConfig {
+    fn default() -> Self {
+        Self {
+            wait_open_time: 400,
+            key_release_interval: 50,
+            diff_key_interval: 20,
+        }
+    }
 }
 
 pub struct KeyPresser {
     /// 按键映射
-    key_map: Arc<HashMap<LocalKey, Key>>,
+    key_map: Arc<HashMap<LocalKey, Input>>,
     one_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
     spare_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
+    tx: mpsc::Sender<Vec<LocalKey>>,
 }
 
 impl KeyPresser {
-    pub fn new(key_map: HashMap<LocalKey, Key>) -> Self {
-        Self {
-            key_map: Arc::new(key_map),
-            one_stack: Arc::new(Mutex::new(None)),
-            spare_stack: Arc::new(Mutex::new(None)),
+    pub fn new(config: KeyPresserConfig, key_map: HashMap<LocalKey, Input>) -> Result<Self> {
+        // 检查所有 LocalKey 是否都在 key_map 中
+        for local_key in [
+            LocalKey::UP,
+            LocalKey::DOWN,
+            LocalKey::LEFT,
+            LocalKey::RIGHT,
+            LocalKey::OPEN,
+            LocalKey::RESEND,
+            LocalKey::THROW,
+        ] {
+            if !key_map.contains_key(&local_key) {
+                return Err(anyhow!("Missing mapping for LocalKey: {:?}", local_key));
+            }
         }
-    }
-
-    pub fn push(&self, keys: &[LocalKey]) {
-        *self.one_stack.lock().unwrap() = Some(keys.to_vec());
-        *self.spare_stack.lock().unwrap() = Some(keys.to_vec());
-    }
-
-    /// block
-    pub fn listen(&self) -> Result<()> {
-        let key_map = Arc::clone(&self.key_map);
-        let one_stack = Arc::clone(&self.one_stack);
-        let spare_stack = Arc::clone(&self.spare_stack);
 
         // keypress worker
         let (tx, rx) = std::sync::mpsc::channel::<Vec<LocalKey>>();
+        let config = Arc::new(config);
+        let key_map = Arc::new(key_map);
         std::thread::spawn({
+            let config = Arc::clone(&config);
             let key_map = Arc::clone(&key_map);
             move || {
                 while let Ok(keys) = rx.recv() {
                     info!("key pressed: {:?}", keys);
-                    std::thread::sleep(Duration::from_millis(400));
-                    for local_key in keys {
-                        if let Some(&key) = key_map.get(&local_key) {
-                            simulate(&EventType::KeyPress(key)).unwrap();
-                            std::thread::sleep(Duration::from_millis(50));
-                            simulate(&EventType::KeyRelease(key)).unwrap();
-                            std::thread::sleep(Duration::from_millis(20));
+                    let mut keys = keys.clone();
+
+                    // check first key is open key
+                    let mut open_key_event_release_type: Option<EventType> = None;
+                    if let Some(first_key) = keys.first() {
+                        if first_key == &LocalKey::OPEN {
+                            if let Some(key) = key_map.get(first_key) {
+                                let event_type = match key {
+                                    Input::Key(key) => {
+                                        open_key_event_release_type =
+                                            Some(EventType::KeyRelease(*key));
+                                        EventType::KeyPress(*key)
+                                    }
+                                    Input::Button(button) => {
+                                        open_key_event_release_type =
+                                            Some(EventType::ButtonRelease(*button));
+                                        EventType::ButtonPress(*button)
+                                    }
+                                };
+
+                                // 模拟按下
+                                simulate(&event_type).unwrap();
+                            }
+
+                            // 移除第一个按键
+                            keys.remove(0);
                         }
+                    }
+
+                    std::thread::sleep(Duration::from_millis(config.wait_open_time));
+                    for local_key in keys {
+                        if let Some(key) = key_map.get(&local_key) {
+                            let event_press_type = match key {
+                                Input::Key(key) => EventType::KeyPress(*key),
+                                Input::Button(button) => EventType::ButtonPress(*button),
+                            };
+                            let event_release_type = match key {
+                                Input::Key(key) => EventType::KeyRelease(*key),
+                                Input::Button(button) => EventType::ButtonRelease(*button),
+                            };
+
+                            // 模拟按下和释放
+                            simulate(&event_press_type).unwrap();
+                            std::thread::sleep(Duration::from_millis(config.key_release_interval));
+                            simulate(&event_release_type).unwrap();
+                            std::thread::sleep(Duration::from_millis(config.diff_key_interval));
+                        }
+                    }
+
+                    // 模拟释放
+                    if let Some(event_type) = open_key_event_release_type {
+                        simulate(&event_type).unwrap();
                     }
                 }
             }
         });
 
+        Ok(Self {
+            key_map,
+            one_stack: Arc::new(Mutex::new(None)),
+            spare_stack: Arc::new(Mutex::new(None)),
+            tx,
+        })
+    }
+
+    pub fn push(&self, keys: &[LocalKey]) {
+        let keys = keys.to_vec();
+
+        if let Some(first_key) = keys.first() {
+            if first_key == &LocalKey::OPEN {
+                self.tx.send(keys.clone()).unwrap();
+            } else {
+                *self.one_stack.lock().unwrap() = Some(keys.clone());
+            }
+        }
+
+        *self.spare_stack.lock().unwrap() = Some(keys.clone());
+    }
+
+    /// block
+    pub fn listen(&self) -> Result<()> {
+        let one_stack = Arc::clone(&self.one_stack);
+        let spare_stack = Arc::clone(&self.spare_stack);
+        let tx = self.tx.clone();
+
+        let open_key = self.key_map.get(&LocalKey::OPEN).unwrap().clone();
+        let resend_key = self.key_map.get(&LocalKey::RESEND).unwrap().clone();
         // block
         rdev::listen(move |event| {
             if let EventType::KeyPress(key) = event.event_type {
-                if key == *key_map.get(&LocalKey::OPEN).unwrap() {
+                if Input::Key(key) == open_key {
                     if let Some(keys) = one_stack.lock().unwrap().take() {
                         tx.send(keys).unwrap();
                     }
-                } else if key == *key_map.get(&LocalKey::RESEND).unwrap() {
+                } else if Input::Key(key) == resend_key {
                     if let Some(keys) = spare_stack.lock().unwrap().clone() {
                         info!("resend key press: {:?}", &keys);
                         one_stack.lock().unwrap().replace(keys);
                     }
                 }
             }
+
+            // 暂不监听鼠标事件
+            // if let EventType::ButtonPress(key) = event.event_type {
+            //     if Input::Button(key) == open_key {
+            //         if let Some(keys) = one_stack.lock().unwrap().take() {
+            //             tx.send(keys).unwrap();
+            //         }
+            //     } else if Input::Button(key) == resend_key {
+            //         if let Some(keys) = spare_stack.lock().unwrap().clone() {
+            //             info!("resend key release: {:?}", &keys);
+            //             one_stack.lock().unwrap().replace(keys);
+            //         }
+            //     }
+            // }
         })
         .map_err(|err| anyhow!("listen key press error: {:?}", err))?;
+
+        Ok(())
+    }
+
+    pub fn has_validity(keys: &[LocalKey]) -> Result<()> {
+        if keys.is_empty() {
+            return Err(anyhow!("keys must not be empty"));
+        }
+
+        if keys.contains(&LocalKey::RESEND) {
+            return Err(anyhow!("can not use resend key"));
+        }
+
+        if keys.contains(&LocalKey::OPEN) || keys.contains(&LocalKey::THROW) {
+            if keys.last() == Some(&LocalKey::OPEN) {
+                return Err(anyhow!("open key must be first"));
+            }
+
+            if keys.first() == Some(&LocalKey::THROW) {
+                return Err(anyhow!("throw key must be last"));
+            }
+
+            if keys.len() > 2 {
+                let mid = &keys[1..keys.len() - 1];
+                for key in mid {
+                    if key == &LocalKey::THROW {
+                        return Err(anyhow!("throw key must be last"));
+                    }
+                    if key == &LocalKey::OPEN {
+                        return Err(anyhow!("open key must be first"));
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

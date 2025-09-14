@@ -1,17 +1,17 @@
 #![allow(unused)]
 
-use std::collections::HashMap;
-use rdev::Key;
 use serde::Deserialize;
+use std::collections::HashMap;
 
-use crate::core::keypress::LocalKey;
 use crate::core::audio::AudioRecognizerConfig;
+use crate::core::keypress::{Input, KeyPresserConfig, LocalKey};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     pub recognizer: RecognizerConfig,
+    pub key_presser: KeyPresserConfig,
     /// 按键映射
-    /// 
+    ///
     /// 示例:
     /// ```toml
     /// [key_map]
@@ -21,9 +21,9 @@ pub struct Config {
     /// RIGHT = "KeyD"
     /// OPEN = "ControlLeft"
     /// ```
-    /// 
+    ///
     /// 更多按键信息请参考: https://docs.rs/rdev/latest/rdev/enum.Key.html
-    pub key_map: HashMap<LocalKey, Key>,
+    pub key_map: HashMap<LocalKey, Input>,
     pub trigger: TriggerConfig,
     pub commands: Vec<CommandConfig>,
 }

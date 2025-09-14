@@ -1,6 +1,6 @@
 // #![allow(unused)]
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait};
 use inquire::Select;
 use log::{info, warn};
@@ -21,6 +21,8 @@ use utils::*;
 mod config;
 pub mod core;
 mod utils;
+
+static AUDIO_DIR: &str = "audio";
 
 fn main() -> Result<()> {
     // print banner
@@ -49,32 +51,40 @@ fn main() -> Result<()> {
     info!("input_device_name: {}", input_device_name);
 
     // init
-    let key_presser = Arc::new(KeyPresser::new(config.key_map));
+    let key_presser_config = config.key_presser;
+    let key_presser = Arc::new(KeyPresser::new(key_presser_config, config.key_map)?);
     let speaker = Arc::new(Speaker::new()?);
 
     let command_map: HashMap<String, Box<dyn Fn() + Send + Sync>> = config
         .commands
         .iter()
-        .map(|cmd| {
+        .map(|cmd| -> Result<(String, Box<dyn Fn() + Send + Sync>)> {
             let key_presser_ref = Arc::clone(&key_presser);
             let speaker_ref = Arc::clone(&speaker);
             let keys = cmd.keys.clone();
             let audio_files = cmd.audio_files.clone();
-            (
+
+            // check
+            if cmd.command.is_empty() {
+                return Err(anyhow!("command must not be empty"));
+            };
+            KeyPresser::has_validity(keys.as_slice())?;
+
+            Ok((
                 cmd.command.clone(),
                 Box::new(move || {
                     key_presser_ref.push(keys.as_slice());
                     if let Some(audio_path) = audio_files.choose(&mut rand::rng()) {
                         let audio_path = std::env::current_dir()
                             .unwrap()
-                            .join("audio")
+                            .join(AUDIO_DIR)
                             .join(audio_path);
                         speaker_ref.play_wav(audio_path.to_str().unwrap()).unwrap();
                     }
                 }) as Box<dyn Fn() + Send + Sync>,
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<HashMap<_, _>>>()?;
     let command = Arc::new(Command::new(command_map));
     let command_dic = command.keys().map(|x| x.to_string()).collect::<Vec<_>>();
 

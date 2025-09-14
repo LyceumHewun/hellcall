@@ -52,7 +52,17 @@ fn main() -> Result<()> {
 
     // init
     let key_presser_config = config.key_presser;
-    let key_presser = Arc::new(KeyPresser::new(key_presser_config, config.key_map)?);
+    let shortcut = config
+        .commands
+        .iter()
+        .filter(|cmd| cmd.shortcut.is_some())
+        .map(|cmd| (cmd.shortcut.clone().unwrap(), cmd.keys.clone()))
+        .collect::<HashMap<_, _>>();
+    let key_presser = Arc::new(KeyPresser::new(
+        key_presser_config,
+        config.key_map,
+        shortcut,
+    )?);
     let speaker = Arc::new(Speaker::new()?);
 
     let command_map: HashMap<String, Box<dyn Fn() + Send + Sync>> = config

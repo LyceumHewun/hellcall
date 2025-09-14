@@ -53,13 +53,18 @@ impl Default for KeyPresserConfig {
 pub struct KeyPresser {
     /// 按键映射
     key_map: Arc<HashMap<LocalKey, Input>>,
+    shortcut: Arc<HashMap<Input, Vec<LocalKey>>>,
     one_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
     spare_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
     tx: mpsc::Sender<Vec<LocalKey>>,
 }
 
 impl KeyPresser {
-    pub fn new(config: KeyPresserConfig, key_map: HashMap<LocalKey, Input>) -> Result<Self> {
+    pub fn new(
+        config: KeyPresserConfig,
+        key_map: HashMap<LocalKey, Input>,
+        shortcut: HashMap<Input, Vec<LocalKey>>,
+    ) -> Result<Self> {
         // 检查所有 LocalKey 是否都在 key_map 中
         for local_key in [
             LocalKey::UP,
@@ -144,6 +149,7 @@ impl KeyPresser {
 
         Ok(Self {
             key_map,
+            shortcut: Arc::new(shortcut),
             one_stack: Arc::new(Mutex::new(None)),
             spare_stack: Arc::new(Mutex::new(None)),
             tx,
@@ -166,6 +172,7 @@ impl KeyPresser {
 
     /// block
     pub fn listen(&self) -> Result<()> {
+        let shortcut = Arc::clone(&self.shortcut);
         let one_stack = Arc::clone(&self.one_stack);
         let spare_stack = Arc::clone(&self.spare_stack);
         let tx = self.tx.clone();
@@ -183,6 +190,11 @@ impl KeyPresser {
                     if let Some(keys) = spare_stack.lock().unwrap().clone() {
                         info!("resend key press: {:?}", &keys);
                         one_stack.lock().unwrap().replace(keys);
+                    }
+                } else {
+                    // 检查是否是快捷键
+                    if let Some(keys) = shortcut.get(&Input::Key(key)) {
+                        tx.send(keys.clone()).unwrap();
                     }
                 }
             }

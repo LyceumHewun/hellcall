@@ -46,6 +46,7 @@ pub struct TriggerConfig {
 pub struct CommandConfig {
     pub command: String,
     pub grammar: Option<String>,
+    pub shortcut: Option<Input>,
     pub keys: Vec<LocalKey>,
     pub audio_files: Vec<String>,
 }

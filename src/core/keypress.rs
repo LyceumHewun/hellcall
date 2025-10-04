@@ -12,8 +12,8 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Input {
+    Button(Button), // 让 Unknown 优先绑定到Button
     Key(Key),
-    Button(Button),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -181,37 +181,27 @@ impl KeyPresser {
         let resend_key = self.key_map.get(&LocalKey::RESEND).unwrap().clone();
         // block
         rdev::listen(move |event| {
-            if let EventType::KeyPress(key) = event.event_type {
-                if Input::Key(key) == open_key {
+            if let Some(input) = match event.event_type {
+                EventType::KeyPress(key) => Some(Input::Key(key)),
+                EventType::ButtonPress(key) => Some(Input::Button(key)),
+                _ => None,
+            } {
+                if input == open_key {
                     if let Some(keys) = one_stack.lock().unwrap().take() {
                         tx.send(keys).unwrap();
                     }
-                } else if Input::Key(key) == resend_key {
+                } else if input == resend_key {
                     if let Some(keys) = spare_stack.lock().unwrap().clone() {
                         info!("resend key press: {:?}", &keys);
                         one_stack.lock().unwrap().replace(keys);
                     }
                 } else {
                     // 检查是否是快捷键
-                    if let Some(keys) = shortcut.get(&Input::Key(key)) {
+                    if let Some(keys) = shortcut.get(&input) {
                         tx.send(keys.clone()).unwrap();
                     }
                 }
             }
-
-            // 暂不监听鼠标事件
-            // if let EventType::ButtonPress(key) = event.event_type {
-            //     if Input::Button(key) == open_key {
-            //         if let Some(keys) = one_stack.lock().unwrap().take() {
-            //             tx.send(keys).unwrap();
-            //         }
-            //     } else if Input::Button(key) == resend_key {
-            //         if let Some(keys) = spare_stack.lock().unwrap().clone() {
-            //             info!("resend key release: {:?}", &keys);
-            //             one_stack.lock().unwrap().replace(keys);
-            //         }
-            //     }
-            // }
         })
         .map_err(|err| anyhow!("listen key press error: {:?}", err))?;
 

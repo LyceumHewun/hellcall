@@ -1,1 +1,7 @@
 /target
+
+# VsCode
+.vscode
+
+# Zed
+.zed

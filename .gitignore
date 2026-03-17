@@ -5,3 +5,11 @@
 
 # Zed
 .zed
+
+# Lib
+/lib/*
+!/lib/.gitkeep
+
+# audio
+/audio/*
+!/audio/.gitkeep

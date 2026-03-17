@@ -1,12 +1,12 @@
 #![allow(unused)]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::core::audio::AudioRecognizerConfig;
 use crate::core::keypress::{Input, KeyPresserConfig, LocalKey};
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Config {
     pub recognizer: RecognizerConfig,
     pub key_presser: KeyPresserConfig,
@@ -28,7 +28,7 @@ pub struct Config {
     pub commands: Vec<CommandConfig>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct RecognizerConfig {
     /// 音频识别的时间段 (秒)
     pub chunk_time: f32,
@@ -36,19 +36,49 @@ pub struct RecognizerConfig {
     pub vad_silence_duration: u64,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct TriggerConfig {
     pub hit_word: Option<String>,
     pub hit_word_grammar: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct CommandConfig {
     pub command: String,
     pub grammar: Option<String>,
     pub shortcut: Option<Input>,
     pub keys: Vec<LocalKey>,
     pub audio_files: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            recognizer: RecognizerConfig::default(),
+            key_presser: KeyPresserConfig::default(),
+            key_map: HashMap::new(),
+            trigger: TriggerConfig::default(),
+            commands: Vec::new(),
+        }
+    }
+}
+
+impl Default for RecognizerConfig {
+    fn default() -> Self {
+        Self {
+            chunk_time: 0.2,
+            vad_silence_duration: 200,
+        }
+    }
+}
+
+impl Default for TriggerConfig {
+    fn default() -> Self {
+        Self {
+            hit_word: None,
+            hit_word_grammar: None,
+        }
+    }
 }
 
 impl Into<AudioRecognizerConfig> for RecognizerConfig {

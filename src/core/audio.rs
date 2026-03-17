@@ -1,11 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Ok, Result};
-use cpal::traits::{DeviceTrait, HostTrait};
+use anyhow::{Context, Result};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, info};
-use std::io::{BufReader, Read};
-use std::process::{Child, Command, Stdio};
 use vosk::{Model, Recognizer};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
@@ -204,7 +202,7 @@ impl AudioRecognizer {
 pub struct AudioBufferProcessor {
     recognizer: Arc<Mutex<AudioRecognizer>>,
     input_device_name: String,
-    child_process: Option<Child>,
+    stream: Option<cpal::Stream>,
 }
 
 impl AudioBufferProcessor {
@@ -221,15 +219,18 @@ impl AudioBufferProcessor {
         Ok(Self {
             recognizer: Arc::new(Mutex::new(recognizer)),
             input_device_name,
-            child_process: None,
+            stream: None,
         })
     }
 
-    pub fn new_with_input_device_name(recognizer: AudioRecognizer, input_device_name: String) -> Result<Self> {
+    pub fn new_with_input_device_name(
+        recognizer: AudioRecognizer,
+        input_device_name: String,
+    ) -> Result<Self> {
         Ok(Self {
             recognizer: Arc::new(Mutex::new(recognizer)),
             input_device_name,
-            child_process: None,
+            stream: None,
         })
     }
 
@@ -238,67 +239,129 @@ impl AudioBufferProcessor {
             self.stop()?;
         }
 
-        let filter = ["highpass=f=100", "lowpass=f=8000"].join(",");
-
-        let child = Command::new("ffmpeg")
-            .args(&[
-                "-hide_banner",
-                "-loglevel", "error",
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-flush_packets", "1",
-                "-avioflags", "direct",
-                "-f",
-                #[cfg(target_os = "windows")]
-                "dshow",
-                #[cfg(target_os = "linux")]
-                "pulse",
-                #[cfg(target_os = "macos")]
-                "avfoundation",
-                "-i", format!("audio={}", &self.input_device_name).as_str(),
-                "-ac", "1",
-                "-ar", "16000",
-                "-af", &filter,
-                "-f", "s16le",
-                "-",
-            ])
-            .stdout(Stdio::piped())
-            .spawn()?;
-
-        self.child_process = Some(child);
-
-        let stdout = self.child_process.as_mut().unwrap().stdout.take().unwrap();
-        let mut reader = BufReader::new(stdout);
-
-        let recognizer = self.recognizer.lock().unwrap();
-        let size = (recognizer.config.chunk_time * VOSK_SAMPLE_RATE * 2.0) as usize;
-        let recognizer_ref = Arc::clone(&self.recognizer);
-
-        // new thread
-        std::thread::spawn(move || -> Result<()> {
-            // 固定采样率 16kHz
-            let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
-            let mut buffer = vec![0u8; size];
-            loop {
-                let n = reader.read(&mut buffer)?;
-                if n == 0 {
+        let host = cpal::default_host();
+        let mut target_device = None;
+        for device in host.input_devices()? {
+            if let std::result::Result::Ok(name) = device.name() {
+                if name == self.input_device_name {
+                    target_device = Some(device);
                     break;
                 }
+            }
+        }
+        let device = target_device
+            .or_else(|| host.default_input_device())
+            .context("Failed to find input device")?;
 
-                // 转成 i16
-                let pcm: Vec<i16> = buffer[..n]
-                    .chunks_exact(2)
-                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
-                    .collect();
+        let config = device
+            .default_input_config()
+            .context("Failed to get default input config")?;
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels();
+        let sample_format = config.sample_format();
 
-                // 处理
-                let mut recognizer = recognizer_ref
-                    .lock()
-                    .map_err(|e| anyhow::anyhow!("Failed to lock recognizer {}", e))?;
-                recognizer.detect_speech(&pcm, &mut vad)?;
-                let _ = recognizer.process_audio_chunk(&pcm)?;
-                if let Some(result) = recognizer.finalize()? {
-                    on_result(result);
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<i16>>();
+
+        let error_callback = |err| log::error!("an error occurred on stream: {}", err);
+
+        let tx_clone = tx.clone();
+
+        fn process_audio_chunk<T: Copy>(
+            data: &[T],
+            channels: u16,
+            sample_rate: u32,
+            to_f32: impl Fn(T) -> f32,
+        ) -> Vec<i16> {
+            let mut output = Vec::new();
+            let ratio = sample_rate as f32 / 16000.0;
+            let frames = data.len() / channels as usize;
+            let out_len = (frames as f32 / ratio).ceil() as usize;
+
+            for i in 0..out_len {
+                let in_frame = (i as f32 * ratio) as usize;
+                if in_frame >= frames {
+                    break;
+                }
+                let in_idx = in_frame * channels as usize;
+
+                let mut sum = 0.0;
+                for c in 0..channels as usize {
+                    sum += to_f32(data[in_idx + c]);
+                }
+                let mono_sample = sum / channels as f32;
+
+                let sample_i16 = (mono_sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                output.push(sample_i16);
+            }
+            output
+        }
+
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _: &_| {
+                    let _ = tx_clone.send(process_audio_chunk(data, channels, sample_rate, |x| x));
+                },
+                error_callback,
+                None,
+            )?,
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _: &_| {
+                    let _ = tx_clone.send(process_audio_chunk(data, channels, sample_rate, |x| {
+                        x as f32 / i16::MAX as f32
+                    }));
+                },
+                error_callback,
+                None,
+            )?,
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[u16], _: &_| {
+                    let _ = tx_clone.send(process_audio_chunk(data, channels, sample_rate, |x| {
+                        (x as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
+                    }));
+                },
+                error_callback,
+                None,
+            )?,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported sample format {:?}",
+                    sample_format
+                ));
+            }
+        };
+
+        stream.play()?;
+        self.stream = Some(stream);
+
+        let recognizer = self.recognizer.lock().unwrap();
+        let chunk_time = recognizer.config.chunk_time;
+        drop(recognizer);
+
+        let samples_per_chunk = (chunk_time * VOSK_SAMPLE_RATE) as usize;
+        let recognizer_ref = Arc::clone(&self.recognizer);
+
+        std::thread::spawn(move || -> Result<()> {
+            let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
+            let mut buffer: Vec<i16> = Vec::new();
+
+            for mut pcm in rx.iter() {
+                buffer.append(&mut pcm);
+
+                while buffer.len() >= samples_per_chunk {
+                    let chunk: Vec<i16> = buffer.drain(..samples_per_chunk).collect();
+
+                    let mut recognizer = recognizer_ref
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("Failed to lock recognizer {}", e))?;
+
+                    recognizer.detect_speech(&chunk, &mut vad)?;
+                    let _ = recognizer.process_audio_chunk(&chunk)?;
+                    if let Some(result) = recognizer.finalize()? {
+                        on_result(result);
+                    }
                 }
             }
             Ok(())
@@ -308,14 +371,11 @@ impl AudioBufferProcessor {
     }
 
     pub fn is_start(&self) -> bool {
-        self.child_process.is_some()
+        self.stream.is_some()
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        if let Some(mut child) = self.child_process.take() {
-            child.kill().context("Failed to kill child process")?;
-            child.wait().context("Failed to wait for child process")?;
-        }
+        self.stream = None;
         Ok(())
     }
 }

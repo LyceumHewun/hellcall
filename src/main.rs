@@ -18,7 +18,7 @@ use core::matcher::*;
 use core::speaker::*;
 use utils::*;
 
-mod config;
+pub mod config;
 pub mod core;
 mod utils;
 
@@ -179,10 +179,10 @@ fn print_banner() {
     println!(
         r#"
 _________________________________________
-                                         
+
     /           /   /               /   /
 ---/__----__---/---/----__----__---/---/-
-  /   ) /___) /   /   /   ' /   ) /   /  
+  /   ) /___) /   /   /   ' /   ) /   /
 _/___/_(___ _/___/___(___ _(___(_/___/___
 
 HellCall v{} - Helldivers 2 语音指令工具

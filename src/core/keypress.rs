@@ -24,10 +24,10 @@ pub enum LocalKey {
     RIGHT,
     /// 打开战备页面按键
     OPEN,
-    /// 重新执行上一次键盘宏按键
-    RESEND,
     /// 扔出战备, 一般是鼠标左键
     THROW,
+    /// 重新执行上一次键盘宏按键
+    RESEND,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

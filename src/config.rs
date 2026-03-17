@@ -56,7 +56,15 @@ impl Default for Config {
         Self {
             recognizer: RecognizerConfig::default(),
             key_presser: KeyPresserConfig::default(),
-            key_map: HashMap::new(),
+            key_map: HashMap::from([
+                (LocalKey::UP, Input::Key(rdev::Key::KeyW)),
+                (LocalKey::DOWN, Input::Key(rdev::Key::KeyS)),
+                (LocalKey::LEFT, Input::Key(rdev::Key::KeyA)),
+                (LocalKey::RIGHT, Input::Key(rdev::Key::KeyD)),
+                (LocalKey::OPEN, Input::Key(rdev::Key::ControlLeft)),
+                (LocalKey::THROW, Input::Button(rdev::Button::Left)),
+                (LocalKey::RESEND, Input::Key(rdev::Key::BackQuote)),
+            ]),
             trigger: TriggerConfig::default(),
             commands: Vec::new(),
         }

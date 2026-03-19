@@ -109,6 +109,7 @@ impl HellcallEngine {
             .collect::<HashMap<_, _>>();
 
         let (key_presser, listener_handle) = if let Some((kp, lh)) = existing {
+            kp.update_config(key_presser_config, config.key_map.clone(), shortcut)?;
             (kp, lh)
         } else {
             let kp = Arc::new(KeyPresser::new(

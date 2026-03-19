@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     sync::atomic::{AtomicUsize, Ordering},
     sync::mpsc,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     thread::JoinHandle,
 };
 
@@ -53,9 +53,10 @@ impl Default for KeyPresserConfig {
 }
 
 pub struct KeyPresser {
+    config: Arc<RwLock<KeyPresserConfig>>,
     /// 按键映射
-    key_map: Arc<HashMap<LocalKey, Input>>,
-    shortcut: Arc<HashMap<Input, Vec<LocalKey>>>,
+    key_map: Arc<RwLock<HashMap<LocalKey, Input>>>,
+    shortcut: Arc<RwLock<HashMap<Input, Vec<LocalKey>>>>,
     one_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
     spare_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
     tx: Option<mpsc::Sender<Vec<LocalKey>>>,
@@ -65,12 +66,7 @@ pub struct KeyPresser {
 }
 
 impl KeyPresser {
-    pub fn new(
-        config: KeyPresserConfig,
-        key_map: HashMap<LocalKey, Input>,
-        shortcut: HashMap<Input, Vec<LocalKey>>,
-    ) -> Result<Self> {
-        // 检查所有 LocalKey 是否都在 key_map 中
+    fn check_key_map(key_map: &HashMap<LocalKey, Input>) -> Result<()> {
         for local_key in [
             LocalKey::UP,
             LocalKey::DOWN,
@@ -84,11 +80,33 @@ impl KeyPresser {
                 return Err(anyhow!("Missing mapping for LocalKey: {:?}", local_key));
             }
         }
+        Ok(())
+    }
+
+    pub fn update_config(
+        &self,
+        config: KeyPresserConfig,
+        key_map: HashMap<LocalKey, Input>,
+        shortcut: HashMap<Input, Vec<LocalKey>>,
+    ) -> Result<()> {
+        Self::check_key_map(&key_map)?;
+        *self.config.write().unwrap() = config;
+        *self.key_map.write().unwrap() = key_map;
+        *self.shortcut.write().unwrap() = shortcut;
+        Ok(())
+    }
+
+    pub fn new(
+        config: KeyPresserConfig,
+        key_map: HashMap<LocalKey, Input>,
+        shortcut: HashMap<Input, Vec<LocalKey>>,
+    ) -> Result<Self> {
+        Self::check_key_map(&key_map)?;
 
         // keypress worker
         let (tx, rx) = std::sync::mpsc::channel::<Vec<LocalKey>>();
-        let config = Arc::new(config);
-        let key_map = Arc::new(key_map);
+        let config = Arc::new(RwLock::new(config));
+        let key_map = Arc::new(RwLock::new(key_map));
         let simulating = Arc::new(AtomicUsize::new(0));
         let handle = std::thread::spawn({
             let config = Arc::clone(&config);
@@ -97,75 +115,66 @@ impl KeyPresser {
             move || {
                 // 定义一个模拟按键的闭包，自动维护 simulating 计数，确保 listen 回调能正确过滤注入事件
                 let sim = |event: &EventType| {
-                    simulating.fetch_add(1, Ordering::Relaxed);
                     if let Err(e) = simulate(event) {
                         log::error!("simulate error: {:?}", e);
                     }
-                    simulating.fetch_sub(1, Ordering::Relaxed);
                 };
 
-                while let Ok(mut keys) = rx.recv() {
+                while let Ok(keys) = rx.recv() {
                     info!("key pressed: {:?}", keys);
 
-                    // check first key is open key
-                    let mut open_key_event_release_type: Option<EventType> = None;
-                    if let Some(first_key) = keys.first() {
-                        if first_key == &LocalKey::OPEN {
-                            if let Some(key) = key_map.get(first_key) {
-                                let event_type = match key {
-                                    Input::Key(key) => {
-                                        open_key_event_release_type =
-                                            Some(EventType::KeyRelease(*key));
-                                        EventType::KeyPress(*key)
-                                    }
-                                    Input::Button(button) => {
-                                        open_key_event_release_type =
-                                            Some(EventType::ButtonRelease(*button));
-                                        EventType::ButtonPress(*button)
-                                    }
-                                };
+                    simulating.fetch_add(1, Ordering::Relaxed);
 
-                                // 模拟按下
-                                sim(&event_type);
-                            }
+                    let c = config.read().unwrap();
+                    let (wait_open_time, key_release_interval, diff_key_interval) = {
+                        (
+                            c.wait_open_time.clone(),
+                            c.key_release_interval.clone(),
+                            c.diff_key_interval.clone(),
+                        )
+                    };
+                    drop(c);
 
-                            // 移除第一个按键
-                            keys.remove(0);
-                        }
-                    }
-
-                    std::thread::sleep(Duration::from_millis(config.wait_open_time));
-                    for local_key in keys {
-                        if let Some(key) = key_map.get(&local_key) {
-                            let (event_press_type, event_release_type) = match key {
-                                Input::Key(key) => {
-                                    (EventType::KeyPress(*key), EventType::KeyRelease(*key))
-                                }
-                                Input::Button(button) => (
-                                    EventType::ButtonPress(*button),
-                                    EventType::ButtonRelease(*button),
-                                ),
+                    // convert keys to events
+                    let km = key_map.read().unwrap();
+                    let key_event_map: Vec<(LocalKey, EventType, EventType)> = keys
+                        .iter()
+                        .filter_map(|k| km.get(k).map(|input| (k.clone(), input.clone())))
+                        .map(|(local_key, input)| {
+                            let press_event_type = match input {
+                                Input::Key(key) => EventType::KeyPress(key),
+                                Input::Button(button) => EventType::ButtonPress(button),
                             };
+                            let release_event_type = match input {
+                                Input::Key(key) => EventType::KeyRelease(key),
+                                Input::Button(button) => EventType::ButtonRelease(button),
+                            };
+                            (local_key, press_event_type, release_event_type)
+                        })
+                        .collect();
+                    drop(km);
 
-                            // 模拟按下和释放
-                            sim(&event_press_type);
-                            std::thread::sleep(Duration::from_millis(config.key_release_interval));
-                            sim(&event_release_type);
-                            std::thread::sleep(Duration::from_millis(config.diff_key_interval));
+                    // simulating
+                    for (key, press_event_type, release_event_type) in &key_event_map {
+                        sim(press_event_type);
+                        std::thread::sleep(Duration::from_millis(key_release_interval));
+                        sim(release_event_type);
+                        if key == &LocalKey::OPEN {
+                            std::thread::sleep(Duration::from_millis(wait_open_time));
+                        } else {
+                            std::thread::sleep(Duration::from_millis(diff_key_interval));
                         }
                     }
 
-                    // 模拟释放
-                    if let Some(event_type) = open_key_event_release_type {
-                        sim(&event_type);
-                    }
+                    simulating.fetch_sub(1, Ordering::Relaxed);
                 }
             }
         });
 
         Ok(Self {
+            config,
             key_map,
-            shortcut: Arc::new(shortcut),
+            shortcut: Arc::new(RwLock::new(shortcut)),
             one_stack: Arc::new(Mutex::new(None)),
             spare_stack: Arc::new(Mutex::new(None)),
             tx: Some(tx),
@@ -194,13 +203,12 @@ impl KeyPresser {
     /// block
     pub fn listen(&self) -> Result<()> {
         let shortcut = Arc::clone(&self.shortcut);
+        let key_map = Arc::clone(&self.key_map);
         let one_stack = Arc::clone(&self.one_stack);
         let spare_stack = Arc::clone(&self.spare_stack);
         let tx = self.tx.as_ref().unwrap().clone();
         let simulating = Arc::clone(&self.simulating);
 
-        let open_key = self.key_map.get(&LocalKey::OPEN).unwrap().clone();
-        let resend_key = self.key_map.get(&LocalKey::RESEND).unwrap().clone();
         // block
         rdev::listen(move |event| {
             // 忽略由 simulate 注入的事件，防止模拟按键误触发快捷键循环
@@ -215,6 +223,16 @@ impl KeyPresser {
                 _ => None,
             }) else {
                 return;
+            };
+
+            let (open_key, resend_key) = {
+                let Ok(km) = key_map.try_read() else {
+                    return;
+                };
+                (
+                    km.get(&LocalKey::OPEN).unwrap().clone(),
+                    km.get(&LocalKey::RESEND).unwrap().clone(),
+                )
             };
 
             if input == open_key {
@@ -235,10 +253,15 @@ impl KeyPresser {
                         guard.replace(keys);
                     }
                 }
-            } else if let Some(keys) = shortcut.get(&input) {
-                // 检查是否是快捷键
-                if let Err(e) = tx.send(keys.clone()) {
-                    log::error!("shortcut send error: {:?}", e);
+            } else {
+                let Ok(sc) = shortcut.try_read() else {
+                    return;
+                };
+                if let Some(keys) = sc.get(&input).cloned() {
+                    drop(sc);
+                    if let Err(e) = tx.send(keys) {
+                        log::error!("shortcut send error: {:?}", e);
+                    }
                 }
             }
         })

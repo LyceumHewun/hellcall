@@ -74,7 +74,7 @@ impl Default for Config {
 impl Default for RecognizerConfig {
     fn default() -> Self {
         Self {
-            chunk_time: 0.2,
+            chunk_time: 0.5,
             vad_silence_duration: 200,
         }
     }

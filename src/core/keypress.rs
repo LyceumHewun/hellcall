@@ -45,8 +45,8 @@ pub struct KeyPresserConfig {
 impl Default for KeyPresserConfig {
     fn default() -> Self {
         Self {
-            wait_open_time: 400,
-            key_release_interval: 50,
+            wait_open_time: 30,
+            key_release_interval: 30,
             diff_key_interval: 20,
         }
     }

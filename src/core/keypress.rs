@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use std::{
     collections::HashMap,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::mpsc,
     sync::{Arc, Mutex},
     thread::JoinHandle,
@@ -59,6 +60,8 @@ pub struct KeyPresser {
     spare_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
     tx: Option<mpsc::Sender<Vec<LocalKey>>>,
     worker_handle: Option<JoinHandle<()>>,
+    /// 当前正在模拟按键的数量，用于 listen 回调过滤注入事件
+    simulating: Arc<AtomicUsize>,
 }
 
 impl KeyPresser {
@@ -86,10 +89,21 @@ impl KeyPresser {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<LocalKey>>();
         let config = Arc::new(config);
         let key_map = Arc::new(key_map);
+        let simulating = Arc::new(AtomicUsize::new(0));
         let handle = std::thread::spawn({
             let config = Arc::clone(&config);
             let key_map = Arc::clone(&key_map);
+            let simulating = Arc::clone(&simulating);
             move || {
+                // 定义一个模拟按键的闭包，自动维护 simulating 计数，确保 listen 回调能正确过滤注入事件
+                let sim = |event: &EventType| {
+                    simulating.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = simulate(event) {
+                        log::error!("simulate error: {:?}", e);
+                    }
+                    simulating.fetch_sub(1, Ordering::Relaxed);
+                };
+
                 while let Ok(mut keys) = rx.recv() {
                     info!("key pressed: {:?}", keys);
 
@@ -112,9 +126,7 @@ impl KeyPresser {
                                 };
 
                                 // 模拟按下
-                                if let Err(e) = simulate(&event_type) {
-                                    log::error!("simulate open-key press error: {:?}", e);
-                                }
+                                sim(&event_type);
                             }
 
                             // 移除第一个按键
@@ -136,22 +148,16 @@ impl KeyPresser {
                             };
 
                             // 模拟按下和释放
-                            if let Err(e) = simulate(&event_press_type) {
-                                log::error!("simulate key press error: {:?}", e);
-                            }
+                            sim(&event_press_type);
                             std::thread::sleep(Duration::from_millis(config.key_release_interval));
-                            if let Err(e) = simulate(&event_release_type) {
-                                log::error!("simulate key release error: {:?}", e);
-                            }
+                            sim(&event_release_type);
                             std::thread::sleep(Duration::from_millis(config.diff_key_interval));
                         }
                     }
 
                     // 模拟释放
                     if let Some(event_type) = open_key_event_release_type {
-                        if let Err(e) = simulate(&event_type) {
-                            log::error!("simulate open-key release error: {:?}", e);
-                        }
+                        sim(&event_type);
                     }
                 }
             }
@@ -164,6 +170,7 @@ impl KeyPresser {
             spare_stack: Arc::new(Mutex::new(None)),
             tx: Some(tx),
             worker_handle: Some(handle),
+            simulating,
         })
     }
 
@@ -190,11 +197,17 @@ impl KeyPresser {
         let one_stack = Arc::clone(&self.one_stack);
         let spare_stack = Arc::clone(&self.spare_stack);
         let tx = self.tx.as_ref().unwrap().clone();
+        let simulating = Arc::clone(&self.simulating);
 
         let open_key = self.key_map.get(&LocalKey::OPEN).unwrap().clone();
         let resend_key = self.key_map.get(&LocalKey::RESEND).unwrap().clone();
         // block
         rdev::listen(move |event| {
+            // 忽略由 simulate 注入的事件，防止模拟按键误触发快捷键循环
+            if simulating.load(Ordering::Relaxed) > 0 {
+                return;
+            }
+
             // 只处理按下事件，其余直接返回，保持钩子回调轻量
             let Some(input) = (match event.event_type {
                 EventType::KeyPress(key) => Some(Input::Key(key)),

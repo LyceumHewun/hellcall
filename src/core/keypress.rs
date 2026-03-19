@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use log::info;
+use log::{debug, info};
 use rdev::{Button, EventType, Key, simulate};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -139,15 +139,17 @@ impl KeyPresser {
                     let km = key_map.read().unwrap();
                     let key_event_map: Vec<(LocalKey, EventType, EventType)> = keys
                         .iter()
-                        .filter_map(|k| km.get(k).map(|input| (k.clone(), input.clone())))
-                        .map(|(local_key, input)| {
-                            let press_event_type = match input {
-                                Input::Key(key) => EventType::KeyPress(key),
-                                Input::Button(button) => EventType::ButtonPress(button),
-                            };
-                            let release_event_type = match input {
-                                Input::Key(key) => EventType::KeyRelease(key),
-                                Input::Button(button) => EventType::ButtonRelease(button),
+                        .map(|k| {
+                            let local_key = k.clone();
+                            let input = km.get(k).unwrap().clone();
+                            let (press_event_type, release_event_type) = match input {
+                                Input::Key(key) => {
+                                    (EventType::KeyPress(key), EventType::KeyRelease(key))
+                                }
+                                Input::Button(button) => (
+                                    EventType::ButtonPress(button),
+                                    EventType::ButtonRelease(button),
+                                ),
                             };
                             (local_key, press_event_type, release_event_type)
                         })
@@ -155,15 +157,25 @@ impl KeyPresser {
                     drop(km);
 
                     // simulating
+                    let mut open_release_event: Option<EventType> = None;
                     for (key, press_event_type, release_event_type) in &key_event_map {
                         sim(press_event_type);
+                        debug!("simulated press event: {:?}", press_event_type);
+
+                        if key == &LocalKey::OPEN {
+                            open_release_event = Some(release_event_type.clone());
+                            std::thread::sleep(Duration::from_millis(wait_open_time));
+                            continue;
+                        }
+
                         std::thread::sleep(Duration::from_millis(key_release_interval));
                         sim(release_event_type);
-                        if key == &LocalKey::OPEN {
-                            std::thread::sleep(Duration::from_millis(wait_open_time));
-                        } else {
-                            std::thread::sleep(Duration::from_millis(diff_key_interval));
-                        }
+                        debug!("simulated release event: {:?}", release_event_type);
+                        std::thread::sleep(Duration::from_millis(diff_key_interval));
+                    }
+                    if let Some(event) = open_release_event {
+                        sim(&event);
+                        debug!("simulated release event: {:?}", event);
                     }
 
                     simulating.fetch_sub(1, Ordering::Relaxed);

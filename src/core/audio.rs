@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -203,6 +204,7 @@ pub struct AudioBufferProcessor {
     recognizer: Arc<Mutex<AudioRecognizer>>,
     input_device_name: String,
     stream: Option<cpal::Stream>,
+    thread_handle: Option<JoinHandle<Result<()>>>,
 }
 
 impl AudioBufferProcessor {
@@ -220,6 +222,7 @@ impl AudioBufferProcessor {
             recognizer: Arc::new(Mutex::new(recognizer)),
             input_device_name,
             stream: None,
+            thread_handle: None,
         })
     }
 
@@ -231,6 +234,7 @@ impl AudioBufferProcessor {
             recognizer: Arc::new(Mutex::new(recognizer)),
             input_device_name,
             stream: None,
+            thread_handle: None,
         })
     }
 
@@ -343,7 +347,7 @@ impl AudioBufferProcessor {
         let samples_per_chunk = (chunk_time * VOSK_SAMPLE_RATE) as usize;
         let recognizer_ref = Arc::clone(&self.recognizer);
 
-        std::thread::spawn(move || -> Result<()> {
+        let handle = std::thread::spawn(move || -> Result<()> {
             let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
             let mut buffer: Vec<i16> = Vec::new();
 
@@ -366,6 +370,7 @@ impl AudioBufferProcessor {
             }
             Ok(())
         });
+        self.thread_handle = Some(handle);
 
         Ok(())
     }
@@ -375,7 +380,20 @@ impl AudioBufferProcessor {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        // Drop the stream first: this drops the tx_clone inside the stream callback,
+        // which closes the mpsc channel and causes rx.iter() in the thread to end.
         self.stream = None;
+        // Now join the processing thread to ensure it has fully exited.
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
         Ok(())
+    }
+}
+
+impl Drop for AudioBufferProcessor {
+    fn drop(&mut self) {
+        // Ensure stream and thread are cleaned up even if stop() was not called explicitly.
+        let _ = self.stop();
     }
 }

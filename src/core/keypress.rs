@@ -7,6 +7,7 @@ use std::{
     collections::HashMap,
     sync::mpsc,
     sync::{Arc, Mutex},
+    thread::JoinHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -56,7 +57,8 @@ pub struct KeyPresser {
     shortcut: Arc<HashMap<Input, Vec<LocalKey>>>,
     one_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
     spare_stack: Arc<Mutex<Option<Vec<LocalKey>>>>,
-    tx: mpsc::Sender<Vec<LocalKey>>,
+    tx: Option<mpsc::Sender<Vec<LocalKey>>>,
+    worker_handle: Option<JoinHandle<()>>,
 }
 
 impl KeyPresser {
@@ -84,7 +86,7 @@ impl KeyPresser {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<LocalKey>>();
         let config = Arc::new(config);
         let key_map = Arc::new(key_map);
-        std::thread::spawn({
+        let handle = std::thread::spawn({
             let config = Arc::clone(&config);
             let key_map = Arc::clone(&key_map);
             move || {
@@ -153,7 +155,8 @@ impl KeyPresser {
             shortcut: Arc::new(shortcut),
             one_stack: Arc::new(Mutex::new(None)),
             spare_stack: Arc::new(Mutex::new(None)),
-            tx,
+            tx: Some(tx),
+            worker_handle: Some(handle),
         })
     }
 
@@ -162,7 +165,9 @@ impl KeyPresser {
 
         if let Some(first_key) = keys.first() {
             if first_key == &LocalKey::OPEN {
-                self.tx.send(keys.clone()).unwrap();
+                if let Some(tx) = &self.tx {
+                    tx.send(keys.clone()).unwrap();
+                }
             } else {
                 *self.one_stack.lock().unwrap() = Some(keys.clone());
                 *self.spare_stack.lock().unwrap() = Some(keys.clone());
@@ -175,7 +180,7 @@ impl KeyPresser {
         let shortcut = Arc::clone(&self.shortcut);
         let one_stack = Arc::clone(&self.one_stack);
         let spare_stack = Arc::clone(&self.spare_stack);
-        let tx = self.tx.clone();
+        let tx = self.tx.as_ref().unwrap().clone();
 
         let open_key = self.key_map.get(&LocalKey::OPEN).unwrap().clone();
         let resend_key = self.key_map.get(&LocalKey::RESEND).unwrap().clone();
@@ -240,5 +245,17 @@ impl KeyPresser {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for KeyPresser {
+    fn drop(&mut self) {
+        // Drop tx first to close the channel: the worker thread's rx.recv()
+        // will return Err and the while-loop exits naturally.
+        drop(self.tx.take());
+        // Then join to wait for the worker thread to fully exit.
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
     }
 }

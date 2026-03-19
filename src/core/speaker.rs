@@ -5,23 +5,28 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 
 pub struct Speaker {
     tx: Sender<String>,
+    _thread_handle: JoinHandle<Result<()>>,
 }
 
 impl Speaker {
     pub fn new() -> Result<Self> {
         let stream_handle =
             OutputStreamBuilder::open_default_stream().context("open default stream failed")?;
-        let tx = Self::init_thread(stream_handle);
+        let (tx, handle) = Self::init_thread(stream_handle);
 
-        Ok(Self { tx })
+        Ok(Self {
+            tx,
+            _thread_handle: handle,
+        })
     }
 
-    fn init_thread(stream_handle: OutputStream) -> Sender<String> {
+    fn init_thread(stream_handle: OutputStream) -> (Sender<String>, JoinHandle<Result<()>>) {
         let (tx, rx) = std::sync::mpsc::channel::<String>();
-        std::thread::spawn(move || -> Result<()> {
+        let handle = std::thread::spawn(move || -> Result<()> {
             while let Ok(audio_path) = rx.recv() {
                 let file = BufReader::new(File::open(&audio_path).context("open file failed")?);
                 info!("play audio: {}", &audio_path);
@@ -33,7 +38,7 @@ impl Speaker {
 
             Ok(())
         });
-        tx
+        (tx, handle)
     }
 
     pub fn play_wav(&self, path: &str) -> Result<()> {
@@ -45,3 +50,9 @@ impl Speaker {
         Ok(())
     }
 }
+
+// When Speaker is dropped, tx is dropped first (field order), which closes the
+// mpsc channel. The thread's rx.recv() will then return Err and the thread exits.
+// _thread_handle is dropped last, but we don't join here because audio playback
+// may still be in progress (sink.sleep_until_end()). The thread will exit naturally
+// after the current audio clip finishes.

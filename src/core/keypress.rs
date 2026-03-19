@@ -90,9 +90,8 @@ impl KeyPresser {
             let config = Arc::clone(&config);
             let key_map = Arc::clone(&key_map);
             move || {
-                while let Ok(keys) = rx.recv() {
+                while let Ok(mut keys) = rx.recv() {
                     info!("key pressed: {:?}", keys);
-                    let mut keys = keys.clone();
 
                     // check first key is open key
                     let mut open_key_event_release_type: Option<EventType> = None;
@@ -113,7 +112,9 @@ impl KeyPresser {
                                 };
 
                                 // 模拟按下
-                                simulate(&event_type).unwrap();
+                                if let Err(e) = simulate(&event_type) {
+                                    log::error!("simulate open-key press error: {:?}", e);
+                                }
                             }
 
                             // 移除第一个按键
@@ -135,16 +136,22 @@ impl KeyPresser {
                             };
 
                             // 模拟按下和释放
-                            simulate(&event_press_type).unwrap();
+                            if let Err(e) = simulate(&event_press_type) {
+                                log::error!("simulate key press error: {:?}", e);
+                            }
                             std::thread::sleep(Duration::from_millis(config.key_release_interval));
-                            simulate(&event_release_type).unwrap();
+                            if let Err(e) = simulate(&event_release_type) {
+                                log::error!("simulate key release error: {:?}", e);
+                            }
                             std::thread::sleep(Duration::from_millis(config.diff_key_interval));
                         }
                     }
 
                     // 模拟释放
                     if let Some(event_type) = open_key_event_release_type {
-                        simulate(&event_type).unwrap();
+                        if let Err(e) = simulate(&event_type) {
+                            log::error!("simulate open-key release error: {:?}", e);
+                        }
                     }
                 }
             }
@@ -166,7 +173,9 @@ impl KeyPresser {
         if let Some(first_key) = keys.first() {
             if first_key == &LocalKey::OPEN {
                 if let Some(tx) = &self.tx {
-                    tx.send(keys.clone()).unwrap();
+                    if let Err(e) = tx.send(keys.clone()) {
+                        log::error!("push send error: {:?}", e);
+                    }
                 }
             } else {
                 *self.one_stack.lock().unwrap() = Some(keys.clone());
@@ -186,25 +195,37 @@ impl KeyPresser {
         let resend_key = self.key_map.get(&LocalKey::RESEND).unwrap().clone();
         // block
         rdev::listen(move |event| {
-            if let Some(input) = match event.event_type {
+            // 只处理按下事件，其余直接返回，保持钩子回调轻量
+            let Some(input) = (match event.event_type {
                 EventType::KeyPress(key) => Some(Input::Key(key)),
                 EventType::ButtonPress(key) => Some(Input::Button(key)),
                 _ => None,
-            } {
-                if input == open_key {
-                    if let Some(keys) = one_stack.lock().unwrap().take() {
-                        tx.send(keys).unwrap();
+            }) else {
+                return;
+            };
+
+            if input == open_key {
+                // 使用 try_lock 非阻塞：若锁被占用则跳过，绝不阻塞系统钩子
+                if let Ok(mut guard) = one_stack.try_lock() {
+                    if let Some(keys) = guard.take() {
+                        if let Err(e) = tx.send(keys) {
+                            log::error!("listen send error: {:?}", e);
+                        }
                     }
-                } else if input == resend_key {
-                    if let Some(keys) = spare_stack.lock().unwrap().clone() {
-                        info!("resend key press: {:?}", &keys);
-                        one_stack.lock().unwrap().replace(keys);
+                }
+            } else if input == resend_key {
+                // 先读 spare_stack，再写 one_stack，避免同时持有两把锁（防死锁）
+                let keys_opt = spare_stack.try_lock().ok().and_then(|g| g.clone());
+                if let Some(keys) = keys_opt {
+                    info!("resend key press: {:?}", &keys);
+                    if let Ok(mut guard) = one_stack.try_lock() {
+                        guard.replace(keys);
                     }
-                } else {
-                    // 检查是否是快捷键
-                    if let Some(keys) = shortcut.get(&input) {
-                        tx.send(keys.clone()).unwrap();
-                    }
+                }
+            } else if let Some(keys) = shortcut.get(&input) {
+                // 检查是否是快捷键
+                if let Err(e) = tx.send(keys.clone()) {
+                    log::error!("shortcut send error: {:?}", e);
                 }
             }
         })
@@ -219,27 +240,30 @@ impl KeyPresser {
         }
 
         if keys.contains(&LocalKey::RESEND) {
-            return Err(anyhow!("can not use resend key"));
+            return Err(anyhow!("cannot use RESEND key in a macro"));
         }
 
-        if keys.contains(&LocalKey::OPEN) || keys.contains(&LocalKey::THROW) {
-            if keys.last() == Some(&LocalKey::OPEN) {
-                return Err(anyhow!("open key must be first"));
-            }
+        let has_open = keys.contains(&LocalKey::OPEN);
+        let has_throw = keys.contains(&LocalKey::THROW);
 
-            if keys.first() == Some(&LocalKey::THROW) {
-                return Err(anyhow!("throw key must be last"));
-            }
+        // OPEN 必须在第一位
+        if has_open && keys.first() != Some(&LocalKey::OPEN) {
+            return Err(anyhow!("OPEN key must be the first key"));
+        }
 
-            if keys.len() > 2 {
-                let mid = &keys[1..keys.len() - 1];
-                for key in mid {
-                    if key == &LocalKey::THROW {
-                        return Err(anyhow!("throw key must be last"));
-                    }
-                    if key == &LocalKey::OPEN {
-                        return Err(anyhow!("open key must be first"));
-                    }
+        // THROW 必须在最后一位
+        if has_throw && keys.last() != Some(&LocalKey::THROW) {
+            return Err(anyhow!("THROW key must be the last key"));
+        }
+
+        // 中间段不允许再出现 OPEN 或 THROW
+        if keys.len() > 2 {
+            for key in &keys[1..keys.len() - 1] {
+                if key == &LocalKey::OPEN {
+                    return Err(anyhow!("OPEN key must be the first key"));
+                }
+                if key == &LocalKey::THROW {
+                    return Err(anyhow!("THROW key must be the last key"));
                 }
             }
         }

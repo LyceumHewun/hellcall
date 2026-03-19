@@ -158,15 +158,22 @@ impl KeyPresser {
 
                     // simulating
                     let mut open_release_event: Option<EventType> = None;
+                    let mut is_waited_open = false;
                     for (key, press_event_type, release_event_type) in &key_event_map {
-                        sim(press_event_type);
-                        debug!("simulated press event: {:?}", press_event_type);
-
                         if key == &LocalKey::OPEN {
+                            sim(press_event_type);
+                            debug!("simulated press [OPEN] event: {:?}", press_event_type);
                             open_release_event = Some(release_event_type.clone());
-                            std::thread::sleep(Duration::from_millis(wait_open_time));
                             continue;
                         }
+
+                        if !is_waited_open {
+                            std::thread::sleep(Duration::from_millis(wait_open_time));
+                            is_waited_open = true;
+                        }
+
+                        sim(press_event_type);
+                        debug!("simulated press event: {:?}", press_event_type);
 
                         std::thread::sleep(Duration::from_millis(key_release_interval));
                         sim(release_event_type);
@@ -175,7 +182,7 @@ impl KeyPresser {
                     }
                     if let Some(event) = open_release_event {
                         sim(&event);
-                        debug!("simulated release event: {:?}", event);
+                        debug!("simulated release [OPEN] event: {:?}", event);
                     }
 
                     simulating.fetch_sub(1, Ordering::Relaxed);

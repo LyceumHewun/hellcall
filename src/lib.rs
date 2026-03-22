@@ -181,7 +181,7 @@ impl HellcallEngine {
             })
             .collect();
 
-        if let Some(hit_word_grammar) = trigger.hit_word_grammar.clone() {
+        if let Some(hit_word_grammar) = trigger.hit_word_grammar.clone().filter(|g| !g.is_empty()) {
             grammar.push(hit_word_grammar);
         } else if !&trigger.hit_word.is_empty() {
             grammar.push(trigger.hit_word.clone().unwrap().add_between_chars(" "));

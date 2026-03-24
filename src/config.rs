@@ -34,6 +34,9 @@ pub struct RecognizerConfig {
     pub chunk_time: f32,
     /// 判断语音结束后的静音持续时间 (毫秒)
     pub vad_silence_duration: u64,
+    /// 是否开启降噪
+    #[serde(default)]
+    pub enable_denoise: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -76,6 +79,7 @@ impl Default for RecognizerConfig {
         Self {
             chunk_time: 0.5,
             vad_silence_duration: 200,
+            enable_denoise: false,
         }
     }
 }
@@ -95,6 +99,7 @@ impl Into<AudioRecognizerConfig> for RecognizerConfig {
             chunk_time: self.chunk_time,
             grammar: Vec::new(),
             vad_silence_duration: self.vad_silence_duration,
+            enable_denoise: self.enable_denoise,
         }
     }
 }

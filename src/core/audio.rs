@@ -5,9 +5,6 @@ use std::thread::JoinHandle;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, info};
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
 use vosk::{Model, Recognizer};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
@@ -324,7 +321,7 @@ impl AudioBufferProcessor {
                 &config.into(),
                 move |data: &[f32], _: &_| {
                     if let Err(std::sync::mpsc::TrySendError::Full(_)) =
-                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| x))
+                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| x * 32768.0))
                     {
                         log::warn!("Audio processing is too slow, dropping frames");
                     }
@@ -336,9 +333,7 @@ impl AudioBufferProcessor {
                 &config.into(),
                 move |data: &[i16], _: &_| {
                     if let Err(std::sync::mpsc::TrySendError::Full(_)) =
-                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| {
-                            x as f32 / i16::MAX as f32
-                        }))
+                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| x as f32))
                     {
                         log::warn!("Audio processing is too slow, dropping frames");
                     }
@@ -349,10 +344,8 @@ impl AudioBufferProcessor {
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[u16], _: &_| {
-                    if let Err(std::sync::mpsc::TrySendError::Full(_)) =
-                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| {
-                            (x as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
-                        }))
+                    if let Err(std::sync::mpsc::TrySendError::Full(_)) = tx_clone
+                        .try_send(process_to_mono_f32(data, channels, |x| x as f32 - 32768.0))
                     {
                         log::warn!("Audio processing is too slow, dropping frames");
                     }
@@ -376,57 +369,53 @@ impl AudioBufferProcessor {
         let samples_per_chunk = (chunk_time * VOSK_SAMPLE_RATE) as usize;
 
         let handle = std::thread::spawn(move || -> Result<AudioRecognizer> {
+            use nnnoiseless::DenoiseState;
+            use rubato::{
+                Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+                WindowFunction,
+            };
+
             let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
+            let mut denoiser = DenoiseState::new();
+            const FRAME_SIZE: usize = 480;
+
             let mut i16_buffer: Vec<i16> = Vec::new();
+            let mut f32_48k_buffer: Vec<f32> = Vec::new();
 
-            if sample_rate == 16000 {
-                for pcm in rx.iter() {
-                    for &sample in &pcm {
-                        i16_buffer.push((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
-                    }
-
-                    while i16_buffer.len() >= samples_per_chunk {
-                        let chunk: Vec<i16> = i16_buffer.drain(..samples_per_chunk).collect();
-                        recognizer.detect_speech(&chunk, &mut vad)?;
-                        let _ = recognizer.process_audio_chunk(&chunk)?;
-                        if let Some(result) = recognizer.finalize()? {
-                            on_result(result);
-                        }
-                    }
-                }
-            } else {
-                let params = SincInterpolationParameters {
+            let mut resampler_out = SincFixedIn::<f32>::new(
+                16000.0 / 48000.0,
+                2.0,
+                SincInterpolationParameters {
                     sinc_len: 256,
                     f_cutoff: 0.95,
                     interpolation: SincInterpolationType::Linear,
                     oversampling_factor: 256,
                     window: WindowFunction::BlackmanHarris2,
-                };
-                let chunk_size = 1024;
-                let mut resampler = SincFixedIn::<f32>::new(
-                    16000.0 / sample_rate as f64,
-                    2.0,
-                    params,
-                    chunk_size,
-                    1,
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to create resampler: {}", e))?;
+                },
+                FRAME_SIZE,
+                1,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create out resampler: {}", e))?;
 
-                let mut f32_buffer: Vec<f32> = Vec::new();
-
+            if sample_rate == 48000 {
                 for pcm in rx.iter() {
-                    f32_buffer.extend(pcm);
+                    f32_48k_buffer.extend(pcm);
 
-                    while f32_buffer.len() >= chunk_size {
-                        let input_chunk: Vec<f32> = f32_buffer.drain(..chunk_size).collect();
-                        let waves_in = vec![input_chunk];
-                        let resampled = resampler
+                    while f32_48k_buffer.len() >= FRAME_SIZE {
+                        let chunk: Vec<f32> = f32_48k_buffer.drain(..FRAME_SIZE).collect();
+                        let mut in_frame = [0.0f32; FRAME_SIZE];
+                        in_frame.copy_from_slice(&chunk);
+
+                        let mut out_frame = [0.0f32; FRAME_SIZE];
+                        let _ = denoiser.process_frame(&mut out_frame, &in_frame);
+
+                        let waves_in = vec![out_frame.to_vec()];
+                        let resampled = resampler_out
                             .process(&waves_in, None)
-                            .map_err(|e| anyhow::anyhow!("Resampling error: {}", e))?;
-                        let resampled_mono = &resampled[0];
+                            .map_err(|e| anyhow::anyhow!("Resampling out error: {}", e))?;
 
-                        for &sample in resampled_mono {
-                            i16_buffer.push((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                        for &sample in &resampled[0] {
+                            i16_buffer.push((sample as f32).clamp(-32768.0, 32767.0) as i16);
                         }
 
                         while i16_buffer.len() >= samples_per_chunk {
@@ -435,6 +424,66 @@ impl AudioBufferProcessor {
                             let _ = recognizer.process_audio_chunk(&chunk)?;
                             if let Some(result) = recognizer.finalize()? {
                                 on_result(result);
+                            }
+                        }
+                    }
+                }
+            } else {
+                let in_chunk_size = 1024;
+                let mut resampler_in = SincFixedIn::<f32>::new(
+                    48000.0 / sample_rate as f64,
+                    2.0,
+                    SincInterpolationParameters {
+                        sinc_len: 256,
+                        f_cutoff: 0.95,
+                        interpolation: SincInterpolationType::Linear,
+                        oversampling_factor: 256,
+                        window: WindowFunction::BlackmanHarris2,
+                    },
+                    in_chunk_size,
+                    1,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create in resampler: {}", e))?;
+
+                let mut f32_in_buffer: Vec<f32> = Vec::new();
+
+                for pcm in rx.iter() {
+                    f32_in_buffer.extend(pcm);
+
+                    while f32_in_buffer.len() >= in_chunk_size {
+                        let input_chunk: Vec<f32> = f32_in_buffer.drain(..in_chunk_size).collect();
+                        let waves_in = vec![input_chunk];
+                        let resampled_in = resampler_in
+                            .process(&waves_in, None)
+                            .map_err(|e| anyhow::anyhow!("Resampling in error: {}", e))?;
+
+                        f32_48k_buffer.extend(&resampled_in[0]);
+
+                        while f32_48k_buffer.len() >= FRAME_SIZE {
+                            let chunk: Vec<f32> = f32_48k_buffer.drain(..FRAME_SIZE).collect();
+                            let mut in_frame = [0.0f32; FRAME_SIZE];
+                            in_frame.copy_from_slice(&chunk);
+
+                            let mut out_frame = [0.0f32; FRAME_SIZE];
+                            let _ = denoiser.process_frame(&mut out_frame, &in_frame);
+
+                            let waves_out = vec![out_frame.to_vec()];
+                            let resampled_out = resampler_out
+                                .process(&waves_out, None)
+                                .map_err(|e| anyhow::anyhow!("Resampling out error: {}", e))?;
+
+                            for &sample in &resampled_out[0] {
+                                i16_buffer.push((sample as f32).clamp(-32768.0, 32767.0) as i16);
+                            }
+
+                            while i16_buffer.len() >= samples_per_chunk {
+                                let chunk: Vec<i16> =
+                                    i16_buffer.drain(..samples_per_chunk).collect();
+                                recognizer.detect_speech(&chunk, &mut vad)?;
+                                let _ = recognizer.process_audio_chunk(&chunk)?;
+                                if let Some(result) = recognizer.finalize()? {
+                                    on_result(result);
+                                }
                             }
                         }
                     }

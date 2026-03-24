@@ -5,6 +5,9 @@ use std::thread::JoinHandle;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, info};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use vosk::{Model, Recognizer};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
@@ -226,10 +229,10 @@ impl AudioRecognizer {
 }
 
 pub struct AudioBufferProcessor {
-    recognizer: Arc<Mutex<AudioRecognizer>>,
+    recognizer: Option<AudioRecognizer>,
     input_device_name: String,
     stream: Option<cpal::Stream>,
-    thread_handle: Option<JoinHandle<Result<()>>>,
+    thread_handle: Option<JoinHandle<Result<AudioRecognizer>>>,
 }
 
 impl AudioBufferProcessor {
@@ -244,7 +247,7 @@ impl AudioBufferProcessor {
         info!("default input device name: {}", &input_device_name);
 
         Ok(Self {
-            recognizer: Arc::new(Mutex::new(recognizer)),
+            recognizer: Some(recognizer),
             input_device_name,
             stream: None,
             thread_handle: None,
@@ -256,7 +259,7 @@ impl AudioBufferProcessor {
         input_device_name: String,
     ) -> Result<Self> {
         Ok(Self {
-            recognizer: Arc::new(Mutex::new(recognizer)),
+            recognizer: Some(recognizer),
             input_device_name,
             stream: None,
             thread_handle: None,
@@ -267,6 +270,11 @@ impl AudioBufferProcessor {
         if self.is_start() {
             self.stop()?;
         }
+
+        let mut recognizer = self
+            .recognizer
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Recognizer is already running or missing"))?;
 
         let host = cpal::default_host();
         let mut target_device = None;
@@ -289,38 +297,24 @@ impl AudioBufferProcessor {
         let channels = config.channels();
         let sample_format = config.sample_format();
 
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<i16>>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(100);
 
         let error_callback = |err| log::error!("an error occurred on stream: {}", err);
 
         let tx_clone = tx.clone();
 
-        fn process_audio_chunk<T: Copy>(
+        fn process_to_mono_f32<T: Copy>(
             data: &[T],
             channels: u16,
-            sample_rate: u32,
             to_f32: impl Fn(T) -> f32,
-        ) -> Vec<i16> {
-            let mut output = Vec::new();
-            let ratio = sample_rate as f32 / 16000.0;
-            let frames = data.len() / channels as usize;
-            let out_len = (frames as f32 / ratio).ceil() as usize;
-
-            for i in 0..out_len {
-                let in_frame = (i as f32 * ratio) as usize;
-                if in_frame >= frames {
-                    break;
-                }
-                let in_idx = in_frame * channels as usize;
-
+        ) -> Vec<f32> {
+            let mut output = Vec::with_capacity(data.len() / channels as usize);
+            for frame in data.chunks(channels as usize) {
                 let mut sum = 0.0;
-                for c in 0..channels as usize {
-                    sum += to_f32(data[in_idx + c]);
+                for &sample in frame {
+                    sum += to_f32(sample);
                 }
-                let mono_sample = sum / channels as f32;
-
-                let sample_i16 = (mono_sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                output.push(sample_i16);
+                output.push(sum / channels as f32);
             }
             output
         }
@@ -329,7 +323,11 @@ impl AudioBufferProcessor {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _: &_| {
-                    let _ = tx_clone.send(process_audio_chunk(data, channels, sample_rate, |x| x));
+                    if let Err(std::sync::mpsc::TrySendError::Full(_)) =
+                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| x))
+                    {
+                        log::warn!("Audio processing is too slow, dropping frames");
+                    }
                 },
                 error_callback,
                 None,
@@ -337,9 +335,13 @@ impl AudioBufferProcessor {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _: &_| {
-                    let _ = tx_clone.send(process_audio_chunk(data, channels, sample_rate, |x| {
-                        x as f32 / i16::MAX as f32
-                    }));
+                    if let Err(std::sync::mpsc::TrySendError::Full(_)) =
+                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| {
+                            x as f32 / i16::MAX as f32
+                        }))
+                    {
+                        log::warn!("Audio processing is too slow, dropping frames");
+                    }
                 },
                 error_callback,
                 None,
@@ -347,14 +349,19 @@ impl AudioBufferProcessor {
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &config.into(),
                 move |data: &[u16], _: &_| {
-                    let _ = tx_clone.send(process_audio_chunk(data, channels, sample_rate, |x| {
-                        (x as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
-                    }));
+                    if let Err(std::sync::mpsc::TrySendError::Full(_)) =
+                        tx_clone.try_send(process_to_mono_f32(data, channels, |x| {
+                            (x as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
+                        }))
+                    {
+                        log::warn!("Audio processing is too slow, dropping frames");
+                    }
                 },
                 error_callback,
                 None,
             )?,
             _ => {
+                self.recognizer = Some(recognizer);
                 return Err(anyhow::anyhow!(
                     "Unsupported sample format {:?}",
                     sample_format
@@ -365,35 +372,75 @@ impl AudioBufferProcessor {
         stream.play()?;
         self.stream = Some(stream);
 
-        let recognizer = self.recognizer.lock().unwrap();
         let chunk_time = recognizer.config.chunk_time;
-        drop(recognizer);
-
         let samples_per_chunk = (chunk_time * VOSK_SAMPLE_RATE) as usize;
-        let recognizer_ref = Arc::clone(&self.recognizer);
 
-        let handle = std::thread::spawn(move || -> Result<()> {
+        let handle = std::thread::spawn(move || -> Result<AudioRecognizer> {
             let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
-            let mut buffer: Vec<i16> = Vec::new();
+            let mut i16_buffer: Vec<i16> = Vec::new();
 
-            for mut pcm in rx.iter() {
-                buffer.append(&mut pcm);
+            if sample_rate == 16000 {
+                for pcm in rx.iter() {
+                    for &sample in &pcm {
+                        i16_buffer.push((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                    }
 
-                while buffer.len() >= samples_per_chunk {
-                    let chunk: Vec<i16> = buffer.drain(..samples_per_chunk).collect();
+                    while i16_buffer.len() >= samples_per_chunk {
+                        let chunk: Vec<i16> = i16_buffer.drain(..samples_per_chunk).collect();
+                        recognizer.detect_speech(&chunk, &mut vad)?;
+                        let _ = recognizer.process_audio_chunk(&chunk)?;
+                        if let Some(result) = recognizer.finalize()? {
+                            on_result(result);
+                        }
+                    }
+                }
+            } else {
+                let params = SincInterpolationParameters {
+                    sinc_len: 256,
+                    f_cutoff: 0.95,
+                    interpolation: SincInterpolationType::Linear,
+                    oversampling_factor: 256,
+                    window: WindowFunction::BlackmanHarris2,
+                };
+                let chunk_size = 1024;
+                let mut resampler = SincFixedIn::<f32>::new(
+                    16000.0 / sample_rate as f64,
+                    2.0,
+                    params,
+                    chunk_size,
+                    1,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create resampler: {}", e))?;
 
-                    let mut recognizer = recognizer_ref
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("Failed to lock recognizer {}", e))?;
+                let mut f32_buffer: Vec<f32> = Vec::new();
 
-                    recognizer.detect_speech(&chunk, &mut vad)?;
-                    let _ = recognizer.process_audio_chunk(&chunk)?;
-                    if let Some(result) = recognizer.finalize()? {
-                        on_result(result);
+                for pcm in rx.iter() {
+                    f32_buffer.extend(pcm);
+
+                    while f32_buffer.len() >= chunk_size {
+                        let input_chunk: Vec<f32> = f32_buffer.drain(..chunk_size).collect();
+                        let waves_in = vec![input_chunk];
+                        let resampled = resampler
+                            .process(&waves_in, None)
+                            .map_err(|e| anyhow::anyhow!("Resampling error: {}", e))?;
+                        let resampled_mono = &resampled[0];
+
+                        for &sample in resampled_mono {
+                            i16_buffer.push((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                        }
+
+                        while i16_buffer.len() >= samples_per_chunk {
+                            let chunk: Vec<i16> = i16_buffer.drain(..samples_per_chunk).collect();
+                            recognizer.detect_speech(&chunk, &mut vad)?;
+                            let _ = recognizer.process_audio_chunk(&chunk)?;
+                            if let Some(result) = recognizer.finalize()? {
+                                on_result(result);
+                            }
+                        }
                     }
                 }
             }
-            Ok(())
+            Ok(recognizer)
         });
         self.thread_handle = Some(handle);
 
@@ -405,12 +452,16 @@ impl AudioBufferProcessor {
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        // Drop the stream first: this drops the tx_clone inside the stream callback,
-        // which closes the mpsc channel and causes rx.iter() in the thread to end.
         self.stream = None;
-        // Now join the processing thread to ensure it has fully exited.
         if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+            match handle.join() {
+                Ok(Ok(mut r)) => {
+                    r.reset();
+                    self.recognizer = Some(r);
+                }
+                Ok(Err(e)) => log::error!("Audio processing thread error: {}", e),
+                Err(e) => log::error!("Audio processing thread panicked: {:?}", e),
+            }
         }
         Ok(())
     }
@@ -418,7 +469,6 @@ impl AudioBufferProcessor {
 
 impl Drop for AudioBufferProcessor {
     fn drop(&mut self) {
-        // Ensure stream and thread are cleaned up even if stop() was not called explicitly.
         let _ = self.stop();
     }
 }

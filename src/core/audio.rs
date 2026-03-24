@@ -49,6 +49,8 @@ pub struct AudioRecognizer {
     is_speaking: AtomicBool,
     silence_start: Mutex<Option<std::time::Instant>>,
     is_finalized: AtomicBool,
+    audio_cache: Vec<i16>,
+    max_cache_samples: usize,
 }
 
 impl Clone for AudioRecognizer {
@@ -64,6 +66,8 @@ impl Clone for AudioRecognizer {
             is_speaking: AtomicBool::new(self.is_speaking.load(Ordering::Acquire)),
             silence_start: Mutex::new(self.silence_start.lock().unwrap().clone()),
             is_finalized: AtomicBool::new(self.is_finalized.load(Ordering::Acquire)),
+            audio_cache: self.audio_cache.clone(),
+            max_cache_samples: self.max_cache_samples,
         }
     }
 }
@@ -75,6 +79,11 @@ impl AudioRecognizer {
         let recognizer = Recognizer::new_with_grammar(&model, VOSK_SAMPLE_RATE, &config.grammar)
             .context("Failed to create Vosk recognizer")?;
 
+        let samples_per_frame = VOSK_SAMPLE_RATE as usize * 20 / 1000;
+        let vad_samples = 4 * samples_per_frame;
+        let chunk_samples = (config.chunk_time * VOSK_SAMPLE_RATE) as usize;
+        let max_cache_samples = chunk_samples + vad_samples;
+
         Ok(Self {
             model: Arc::new(model),
             recognizer,
@@ -82,6 +91,8 @@ impl AudioRecognizer {
             is_speaking: AtomicBool::new(false),
             silence_start: Mutex::new(None),
             is_finalized: AtomicBool::new(false),
+            audio_cache: Vec::with_capacity(max_cache_samples),
+            max_cache_samples,
         })
     }
 
@@ -90,6 +101,13 @@ impl AudioRecognizer {
         audio_chunk: &[i16],
     ) -> Result<Option<RecognitionResult>> {
         if self.is_speaking.load(Ordering::Acquire) {
+            if !self.audio_cache.is_empty() {
+                self.recognizer
+                    .accept_waveform(&self.audio_cache)
+                    .context("Failed to accept cached waveform")?;
+                self.audio_cache.clear();
+            }
+
             self.recognizer
                 .accept_waveform(audio_chunk)
                 .context("Failed to accept waveform")?;
@@ -102,6 +120,12 @@ impl AudioRecognizer {
             debug!("partial result: {:?}", result);
 
             return Ok(Some(result));
+        } else {
+            self.audio_cache.extend_from_slice(audio_chunk);
+            if self.audio_cache.len() > self.max_cache_samples {
+                let overflow = self.audio_cache.len() - self.max_cache_samples;
+                self.audio_cache.drain(0..overflow);
+            }
         }
 
         Ok(None)
@@ -197,6 +221,7 @@ impl AudioRecognizer {
         self.is_speaking.store(false, Ordering::Release);
         *self.silence_start.lock().unwrap() = None;
         self.is_finalized.store(false, Ordering::Release);
+        self.audio_cache.clear();
     }
 }
 

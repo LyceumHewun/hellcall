@@ -30,6 +30,8 @@ pub enum LocalKey {
     THROW,
     /// 重新执行上一次键盘宏按键
     RESEND,
+    /// Push-to-Talk 按住说话
+    PTT,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +65,7 @@ pub struct KeyPresser {
     worker_handle: Option<JoinHandle<()>>,
     /// 当前正在模拟按键的数量，用于 listen 回调过滤注入事件
     simulating: Arc<AtomicUsize>,
+    listen_key_map: Arc<Mutex<HashMap<Input, Box<dyn FnMut(bool) + Send + 'static>>>>,
 }
 
 impl KeyPresser {
@@ -199,6 +202,7 @@ impl KeyPresser {
             tx: Some(tx),
             worker_handle: Some(handle),
             simulating,
+            listen_key_map: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -219,6 +223,21 @@ impl KeyPresser {
         }
     }
 
+    /// 注册一个全局按键监听器
+    ///
+    /// 当指定的按键 `key` 被按下或释放时，会触发 `callback` 函数。
+    /// `callback` 的参数为 `true` 表示按下，`false` 表示释放。
+    pub fn listen_key<F>(&self, key: Input, callback: F) -> Result<()>
+    where
+        F: FnMut(bool) + Send + 'static,
+    {
+        self.listen_key_map
+            .lock()
+            .unwrap()
+            .insert(key, Box::new(callback));
+        Ok(())
+    }
+
     /// block
     pub fn listen(&self) -> Result<()> {
         let shortcut = Arc::clone(&self.shortcut);
@@ -227,9 +246,31 @@ impl KeyPresser {
         let spare_stack = Arc::clone(&self.spare_stack);
         let tx = self.tx.as_ref().unwrap().clone();
         let simulating = Arc::clone(&self.simulating);
+        let listen_key_map = Arc::clone(&self.listen_key_map);
 
         // block
         rdev::listen(move |event| {
+            // 首先处理注册的监听按键（包括按下和松开），不受 simulate 状态影响
+            if let Ok(mut listeners) = listen_key_map.try_lock() {
+                for (input, callback) in listeners.iter_mut() {
+                    let is_press = match (&event.event_type, input) {
+                        (EventType::KeyPress(k), Input::Key(pk)) => k == pk,
+                        (EventType::ButtonPress(b), Input::Button(pb)) => b == pb,
+                        _ => false,
+                    };
+                    let is_release = match (&event.event_type, input) {
+                        (EventType::KeyRelease(k), Input::Key(pk)) => k == pk,
+                        (EventType::ButtonRelease(b), Input::Button(pb)) => b == pb,
+                        _ => false,
+                    };
+                    if is_press {
+                        callback(true);
+                    } else if is_release {
+                        callback(false);
+                    }
+                }
+            }
+
             // 忽略由 simulate 注入的事件，防止模拟按键误触发快捷键循环
             if simulating.load(Ordering::Relaxed) > 0 {
                 return;

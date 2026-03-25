@@ -19,10 +19,10 @@ impl LevenshteinMatcher {
             return Some(candidate.clone());
         }
 
-        let max_levenshtein = 1;   // 编辑距离阈值
-        let min_jaro = 0.80;         // jaro-winkler 最低相似度
-        let alpha = 0.7;             // 权重：levenshtein
-        let beta = 0.3;              // 权重：jaro_winkler
+        let max_levenshtein = 1; // 编辑距离阈值
+        let min_jaro = 0.80; // jaro-winkler 最低相似度
+        let alpha = 0.7; // 权重：levenshtein
+        let beta = 0.3; // 权重：jaro_winkler
 
         let candidate = self
             .dict

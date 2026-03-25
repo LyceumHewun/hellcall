@@ -37,6 +37,18 @@ pub struct RecognizerConfig {
     /// 是否开启降噪
     #[serde(default)]
     pub enable_denoise: bool,
+    /// 语音识别的模式
+    #[serde(default)]
+    pub talk_mode: TalkMode,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum TalkMode {
+    #[serde(rename = "push_to_talk")]
+    PushToTalk,
+    #[serde(rename = "voice_activation")]
+    #[default]
+    VoiceActivation,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -80,6 +92,7 @@ impl Default for RecognizerConfig {
             chunk_time: 0.5,
             vad_silence_duration: 200,
             enable_denoise: false,
+            talk_mode: TalkMode::VoiceActivation,
         }
     }
 }
@@ -100,6 +113,7 @@ impl Into<AudioRecognizerConfig> for RecognizerConfig {
             grammar: Vec::new(),
             vad_silence_duration: self.vad_silence_duration,
             enable_denoise: self.enable_denoise,
+            is_ptt: self.talk_mode == TalkMode::PushToTalk,
         }
     }
 }

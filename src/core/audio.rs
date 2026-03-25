@@ -20,6 +20,8 @@ pub struct AudioRecognizerConfig {
     pub vad_silence_duration: u64,
     /// 是否开启降噪
     pub enable_denoise: bool,
+    /// 是否为按键说话模式
+    pub is_ptt: bool,
 }
 
 impl Default for AudioRecognizerConfig {
@@ -29,6 +31,7 @@ impl Default for AudioRecognizerConfig {
             grammar: Vec::new(),
             vad_silence_duration: 500,
             enable_denoise: false,
+            is_ptt: false,
         }
     }
 }
@@ -48,10 +51,10 @@ pub struct RecognitionResult {
 pub struct AudioRecognizer {
     model: Arc<Model>,
     recognizer: Recognizer,
-    config: AudioRecognizerConfig,
-    is_speaking: AtomicBool,
+    pub config: AudioRecognizerConfig,
+    is_speaking: Arc<AtomicBool>,
     silence_start: Mutex<Option<std::time::Instant>>,
-    is_finalized: AtomicBool,
+    is_finalized: Arc<AtomicBool>,
     audio_cache: Vec<i16>,
     max_cache_samples: usize,
 }
@@ -66,9 +69,9 @@ impl Clone for AudioRecognizer {
             model: self.model.clone(),
             recognizer,
             config: self.config.clone(),
-            is_speaking: AtomicBool::new(self.is_speaking.load(Ordering::Acquire)),
+            is_speaking: Arc::clone(&self.is_speaking),
             silence_start: Mutex::new(self.silence_start.lock().unwrap().clone()),
-            is_finalized: AtomicBool::new(self.is_finalized.load(Ordering::Acquire)),
+            is_finalized: Arc::clone(&self.is_finalized),
             audio_cache: self.audio_cache.clone(),
             max_cache_samples: self.max_cache_samples,
         }
@@ -91,9 +94,9 @@ impl AudioRecognizer {
             model: Arc::new(model),
             recognizer,
             config,
-            is_speaking: AtomicBool::new(false),
+            is_speaking: Arc::new(AtomicBool::new(false)),
             silence_start: Mutex::new(None),
-            is_finalized: AtomicBool::new(false),
+            is_finalized: Arc::new(AtomicBool::new(false)),
             audio_cache: Vec::with_capacity(max_cache_samples),
             max_cache_samples,
         })
@@ -158,6 +161,10 @@ impl AudioRecognizer {
 
     /// 检测语音活动
     pub fn detect_speech(&mut self, audio_chunk: &[i16], vad: &mut Vad) -> Result<()> {
+        if self.config.is_ptt {
+            return Ok(());
+        }
+
         if audio_chunk.is_empty() {
             return Ok(());
         }
@@ -228,11 +235,32 @@ impl AudioRecognizer {
     }
 }
 
+#[derive(Clone)]
+pub struct AudioSpeechController {
+    is_speaking: Option<Arc<AtomicBool>>,
+    is_finalized: Option<Arc<AtomicBool>>,
+}
+
+impl AudioSpeechController {
+    pub fn set_is_speaking(&self, speaking: bool) {
+        if let Some(is_speaking) = &self.is_speaking {
+            is_speaking.store(speaking, Ordering::Release);
+            if !speaking {
+                if let Some(is_finalized) = &self.is_finalized {
+                    is_finalized.store(true, Ordering::Release);
+                }
+            }
+        }
+    }
+}
+
 pub struct AudioBufferProcessor {
     recognizer: Option<AudioRecognizer>,
     input_device_name: String,
     stream: Option<cpal::Stream>,
     thread_handle: Option<JoinHandle<Result<AudioRecognizer>>>,
+    is_speaking: Option<Arc<AtomicBool>>,
+    is_finalized: Option<Arc<AtomicBool>>,
 }
 
 impl AudioBufferProcessor {
@@ -246,11 +274,16 @@ impl AudioBufferProcessor {
 
         info!("default input device name: {}", &input_device_name);
 
+        let is_speaking = Arc::clone(&recognizer.is_speaking);
+        let is_finalized = Arc::clone(&recognizer.is_finalized);
+
         Ok(Self {
             recognizer: Some(recognizer),
             input_device_name,
             stream: None,
             thread_handle: None,
+            is_speaking: Some(is_speaking),
+            is_finalized: Some(is_finalized),
         })
     }
 
@@ -258,12 +291,24 @@ impl AudioBufferProcessor {
         recognizer: AudioRecognizer,
         input_device_name: String,
     ) -> Result<Self> {
+        let is_speaking = Arc::clone(&recognizer.is_speaking);
+        let is_finalized = Arc::clone(&recognizer.is_finalized);
+
         Ok(Self {
             recognizer: Some(recognizer),
             input_device_name,
             stream: None,
             thread_handle: None,
+            is_speaking: Some(is_speaking),
+            is_finalized: Some(is_finalized),
         })
+    }
+
+    pub fn get_speech_controller(&self) -> AudioSpeechController {
+        AudioSpeechController {
+            is_speaking: self.is_speaking.clone(),
+            is_finalized: self.is_finalized.clone(),
+        }
     }
 
     pub fn start(&mut self, on_result: Box<dyn Fn(RecognitionResult) + Send>) -> Result<()> {

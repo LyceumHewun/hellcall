@@ -192,6 +192,14 @@ impl HellcallEngine {
         let mut processor =
             AudioBufferProcessor::new_with_input_device_name(recognizer, input_device)?;
 
+        // listen push-to-talk key
+        if let Some(ptt_input) = config.key_map.get(&LocalKey::PTT).cloned() {
+            let speech_ctrl = processor.get_speech_controller();
+            let _ = key_presser.listen_key(ptt_input, move |speaking| {
+                speech_ctrl.set_is_speaking(speaking);
+            });
+        }
+
         let command_ref = Arc::clone(&command);
         let matcher_ref = Arc::clone(&matcher);
         let cancel_flag = Arc::new(AtomicBool::new(false));

@@ -15,7 +15,7 @@ impl Deref for Command {
 impl Command {
     pub fn new(map: HashMap<String, Box<dyn Fn() + Send + Sync>>) -> Self {
         Self { map }
-    }   
+    }
 
     pub fn execute(&self, command: &str) {
         if let Some(f) = self.map.get(command) {

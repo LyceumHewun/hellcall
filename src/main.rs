@@ -60,7 +60,7 @@ fn main() -> Result<()> {
         .collect::<HashMap<_, _>>();
     let key_presser = Arc::new(KeyPresser::new(
         key_presser_config,
-        config.key_map,
+        config.key_map.clone(),
         shortcut,
     )?);
     let speaker = Arc::new(Speaker::new()?);
@@ -128,6 +128,14 @@ fn main() -> Result<()> {
     let recognizer = AudioRecognizer::new(model_path.as_str(), audio_recognizer_config)?;
     let mut processor =
         AudioBufferProcessor::new_with_input_device_name(recognizer, input_device_name)?;
+
+    // listen push-to-talk key
+    if let Some(ptt_input) = config.key_map.get(&LocalKey::PTT).cloned() {
+        let speech_ctrl = processor.get_speech_controller();
+        key_presser.listen_key(ptt_input, move |speaking| {
+            speech_ctrl.set_is_speaking(speaking);
+        })?;
+    }
 
     let command_ref = Arc::clone(&command);
     let matcher_ref = Arc::clone(&matcher);

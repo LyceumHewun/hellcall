@@ -1,3 +1,5 @@
+> 本项目已集成在 [hellcall-desktop](https://github.com/LyceumHewun/hellcall-desktop) 项目，往后不再更新
+
 # HellCall
 
 **HellCall** 是一个专为《绝地潜兵 2》(Helldivers 2) 打造的语音指令工具，能够将你的语音指令转化为游戏内的键盘宏操作，让你通过说话即可快速呼叫战备！
